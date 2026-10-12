@@ -19,6 +19,7 @@ struct OpenScreenStudioApp: App {
     }
 }
 struct StudioView: View {
+    @State private var countdown = RecordingCountdown()
     @State private var cameraPreview = CameraPreviewPanel()
     @StateObject private var micCheck = MicrophoneCheck()
     @StateObject private var recordingMenu = RecordingMenu()
@@ -239,19 +240,24 @@ struct StudioView: View {
             let folder = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask).first!.appendingPathComponent("OpenScreenStudio")
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             let destination = folder.appendingPathComponent("Recording-\(Int(Date().timeIntervalSince1970)).mov")
-            webcamURL = nil
             var crop: CGRect? = nil
             if source == "region" { let v = region.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }; guard v.count == 4, v[2] > 0, v[3] > 0 else { throw CaptureFailure.message("区域格式应为 x,y,宽,高，例如 0,0,1280,720。") }; crop = CGRect(x: v[0], y: v[1], width: v[2], height: v[3]) }
             let free = try folder.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage ?? Int64.max
             guard free > 512 * 1024 * 1024 else { throw CaptureFailure.message("可用空间不足 512 MB，请清理磁盘后再录制。") }
             if microphone && !supportsMicrophone { throw CaptureFailure.message("麦克风录制需要 macOS 15+。") }
+            let studio = NSApp.windows.first { $0.identifier?.rawValue == "studio" }
+            if hideWorkbench { studio?.orderOut(nil) }
+            guard await countdown.run(source:capture.selectedSourceName) else {
+                studio?.makeKeyAndOrderFront(nil);message = "已取消录制";if microphone { Task { await micCheck.start() } };return
+            }
+            webcamURL = nil
             if webcam { let cameraFile = destination.deletingPathExtension().appendingPathExtension("camera.mov"); try await camera.start(outputURL: cameraFile); webcamURL = cameraFile }
             let origin = CMClockGetTime(CMClockGetHostTimeClock())
             camera.beginTimeline(at: origin)
             try await capture.start(timelineStart: origin, displayID: displayID == 0 ? nil : displayID, windowID: nil, microphone: microphone, systemAudio: systemAudio, sourceRect: crop, showCursor: cursor, fps: fps, outputURL: destination)
             recordedCursor = cursor; elapsed = 0;updateRecordingMenu();if hideWorkbench { NSApp.windows.filter { $0.identifier?.rawValue == "studio" || $0.identifier?.rawValue == "large-preview" }.forEach { $0.orderOut(nil) } }
              message = "正在录制；停止后保存至 Movies/OpenScreenStudio。"
-        } catch { if webcam { _ = await camera.stop();Task { await camera.startPreview() } }; message = error.localizedDescription }
+        } catch { NSApp.windows.first { $0.identifier?.rawValue == "studio" }?.makeKeyAndOrderFront(nil);if webcam { _ = await camera.stop();Task { await camera.startPreview() } }; message = error.localizedDescription }
     }
     private var recoveryURL: URL { FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("LuYing/Recovery.ossproject") }
     private var currentProject: StudioProject? {
