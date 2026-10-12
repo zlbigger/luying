@@ -21,7 +21,7 @@ struct OpenScreenStudioApp: App {
 struct StudioView: View {
     @State private var cameraPreview = CameraPreviewPanel()
     @StateObject private var micCheck = MicrophoneCheck()
-    @State private var recordingMenu = RecordingMenu()
+    @StateObject private var recordingMenu = RecordingMenu()
     @AppStorage("hideWorkbenchWhenRecording") private var hideWorkbench = true
     @State private var lastExport: URL?
     @StateObject private var capture = CaptureEngine()
@@ -97,6 +97,7 @@ struct StudioView: View {
                         .frame(maxWidth: .infinity).padding(8)
                 }.buttonStyle(.borderedProminent).tint(capture.isRecording ? .red : .indigo).keyboardShortcut("r", modifiers: [.command,.shift]).disabled(exporting || capture.isSaving || capture.isStarting || recordingBusy || capture.isSelecting)
                 if capture.isRecording { Button(capture.isPaused ? "继续录制" : "暂停录制", systemImage: capture.isPaused ? "play.fill" : "pause.fill") { let time = CMClockGetTime(CMClockGetHostTimeClock()); capture.togglePause(at: time); camera.setPaused(capture.isPaused, at: time) } }
+                Text(recordingMenu.shortcutStatus).font(.caption).foregroundStyle(.secondary)
                 Text(capture.deviceStatus).font(.caption).foregroundStyle(.secondary)
                 Text(capture.status).font(.caption).foregroundStyle(.secondary)
                 Divider()
@@ -210,9 +211,10 @@ struct StudioView: View {
     }
     func updateRecordingMenu() {
         recordingMenu.pause = {
+            guard capture.isRecording, !recordingBusy, !capture.isSaving else { return }
             let time = CMClockGetTime(CMClockGetHostTimeClock());capture.togglePause(at: time);camera.setPaused(capture.isPaused, at: time)
         }
-        recordingMenu.stop = { Task { await record() } }
+        recordingMenu.stop = { guard capture.isRecording, !recordingBusy, !capture.isSaving else { return };Task { await record() } }
         recordingMenu.update(recording: capture.isRecording, paused: capture.isPaused, seconds: elapsed, source: capture.selectedSourceName)
     }
     private var supportsMicrophone: Bool { if #available(macOS 15.0, *) { return true }; return false }

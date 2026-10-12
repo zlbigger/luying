@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import Combine
+import Carbon
 
 @MainActor
 final class MicrophoneCheck: ObservableObject {
@@ -38,13 +39,57 @@ final class MicrophoneCheck: ObservableObject {
 }
 
 @MainActor
-final class RecordingMenu: NSObject {
+final class RecordingMenu: NSObject, ObservableObject {
+    @Published private(set) var shortcutStatus = "录制时：⌘⇧P 暂停／继续 · ⌘⇧S 停止并保存"
+    private var hotKeys: [EventHotKeyRef] = []
+    private var eventHandler: EventHandlerRef?
+    private var shortcutsActive = false
+    private var localKeys: Any?
+    private func registerShortcuts() {
+        guard !shortcutsActive else { return };shortcutsActive = true
+        localKeys = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == [.command,.shift], !event.isARepeat else { return event }
+            if event.keyCode == UInt16(kVK_ANSI_P) { self?.pause?();return nil }
+            if event.keyCode == UInt16(kVK_ANSI_S) { self?.stop?();return nil }
+            return event
+        }
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        let installed = InstallEventHandler(GetApplicationEventTarget(), { _, event, context in
+            guard let event, let context else { return OSStatus(eventNotHandledErr) }
+            var identity = EventHotKeyID()
+            let result = GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &identity)
+            guard result == noErr, identity.signature == 0x4C755969 else { return OSStatus(eventNotHandledErr) }
+            let menu = Unmanaged<RecordingMenu>.fromOpaque(context).takeUnretainedValue()
+            let keyID = identity.id
+            Task { @MainActor in
+                guard menu.shortcutsActive else { return }
+                if keyID == 1 { menu.pause?() } else if keyID == 2 { menu.stop?() }
+            }
+            return noErr
+        }, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), &eventHandler)
+        guard installed == noErr else { shortcutStatus = "快捷键不可用，请使用菜单栏暂停或停止";return }
+        var failed = false
+        for (key, id) in [(UInt32(kVK_ANSI_P), UInt32(1)), (UInt32(kVK_ANSI_S), UInt32(2))] {
+            var reference: EventHotKeyRef?
+            let result = RegisterEventHotKey(key, UInt32(cmdKey | shiftKey), EventHotKeyID(signature: 0x4C755969, id: id), GetApplicationEventTarget(), 0, &reference)
+            if result == noErr, let reference { hotKeys.append(reference) } else { failed = true }
+        }
+        shortcutStatus = failed ? "部分快捷键被占用，请使用菜单栏暂停或停止" : "⌘⇧P 暂停／继续 · ⌘⇧S 停止并保存（全局）"
+    }
+    private func unregisterShortcuts() {
+        shortcutsActive = false
+        if let localKeys { NSEvent.removeMonitor(localKeys) };localKeys = nil
+        hotKeys.forEach { UnregisterEventHotKey($0) };hotKeys.removeAll()
+        if let eventHandler { RemoveEventHandler(eventHandler) };eventHandler = nil
+        shortcutStatus = "录制时：⌘⇧P 暂停／继续 · ⌘⇧S 停止并保存"
+    }
     private var item: NSStatusItem?
     private var menuState = ""
     var pause: (() -> Void)?
     var stop: (() -> Void)?
     func update(recording: Bool, paused: Bool, seconds: Int, source: String) {
-        guard recording else { if let item { NSStatusBar.system.removeStatusItem(item) };item = nil;menuState = "";return }
+        guard recording else { if shortcutsActive { unregisterShortcuts() };if let item { NSStatusBar.system.removeStatusItem(item) };item = nil;menuState = "";return }
+        registerShortcuts()
         if item == nil { item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength) }
         item?.button?.title = (paused ? "Ⅱ " : "● ") + String(format: "%02d:%02d", seconds / 60, seconds % 60)
         item?.button?.toolTip = "录映 · " + source
@@ -52,8 +97,8 @@ final class RecordingMenu: NSObject {
         guard state != menuState else { return };menuState = state
         let menu = NSMenu()
         let label = NSMenuItem(title: source, action: nil, keyEquivalent: "");label.isEnabled = false;menu.addItem(label)
-        let toggle = NSMenuItem(title: paused ? "继续录制" : "暂停录制", action: #selector(togglePause), keyEquivalent: "");toggle.target = self;menu.addItem(toggle)
-        let finish = NSMenuItem(title: "停止并保存", action: #selector(finishRecording), keyEquivalent: "");finish.target = self;menu.addItem(finish)
+        let toggle = NSMenuItem(title: paused ? "继续录制  ⌘⇧P" : "暂停录制  ⌘⇧P", action: #selector(togglePause), keyEquivalent: "");toggle.target = self;menu.addItem(toggle)
+        let finish = NSMenuItem(title: "停止并保存  ⌘⇧S", action: #selector(finishRecording), keyEquivalent: "");finish.target = self;menu.addItem(finish)
         let show = NSMenuItem(title: "显示工作台", action: #selector(showStudio), keyEquivalent: "");show.target = self;menu.addItem(show)
         item?.menu = menu
     }
