@@ -1,132 +1,80 @@
 @preconcurrency import AVFoundation
 import Combine
 
-/// Records a silent camera sidecar for compositing into the screen recording.
 @MainActor
 final class WebcamRecorder: NSObject, ObservableObject {
     @Published private(set) var isRecording = false
     @Published private(set) var status = "摄像头待机"
     @Published private(set) var error: String?
-
-    private let session = AVCaptureSession()
-    private let movieOutput = AVCaptureMovieFileOutput()
-    private let sessionQueue = DispatchQueue(label: "OpenScreenStudio.webcam")
-    private var configured = false
-    private var preparing = false
+    private var session: AVCaptureSession?
+    private var sink: CameraSink?
+    private let queue = DispatchQueue(label: "LuYing.camera")
     private var currentURL: URL?
-    private var startContinuation: CheckedContinuation<Void, Error>?
-    private var stopContinuations: [CheckedContinuation<URL?, Never>] = []
 
     func start(outputURL: URL) async throws {
-        guard !isRecording, !preparing, currentURL == nil else {
-            throw WebcamFailure.message("摄像头正在录制或保存。")
-        }
-        preparing = true
-        error = nil
-        status = "正在准备摄像头…"
-        defer { preparing = false }
-        do {
-            guard await AVCaptureDevice.requestAccess(for: .video) else {
-                throw WebcamFailure.message("请在系统设置 → 隐私与安全性 → 摄像头中允许访问。")
-            }
-            guard !FileManager.default.fileExists(atPath: outputURL.path) else {
-                throw WebcamFailure.message("摄像头输出文件已存在，请选择新的文件名。")
-            }
-            if !configured {
-                guard let camera = AVCaptureDevice.default(for: .video) else {
-                    throw WebcamFailure.message("未找到摄像头。")
-                }
-                let input = try AVCaptureDeviceInput(device: camera)
-                session.beginConfiguration()
-                if session.canSetSessionPreset(.hd1280x720) { session.sessionPreset = .hd1280x720 }
-                guard session.canAddInput(input), session.canAddOutput(movieOutput) else {
-                    session.commitConfiguration()
-                    throw WebcamFailure.message("无法配置摄像头录制。")
-                }
-                session.addInput(input)
-                session.addOutput(movieOutput)
-                session.commitConfiguration()
-                configured = true
-            }
-            let captureSession = session
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                sessionQueue.async {
-                    captureSession.startRunning()
-                    continuation.resume()
-                }
-            }
-            guard session.isRunning else { throw WebcamFailure.message("摄像头启动失败，可能正在被其他应用使用。") }
-            currentURL = outputURL
-            try await withCheckedThrowingContinuation { continuation in
-                startContinuation = continuation
-                movieOutput.startRecording(to: outputURL, recordingDelegate: self)
-            }
-        } catch {
-            self.error = error.localizedDescription
-            status = "摄像头启动失败"
-            if currentURL == nil { stopSession() }
-            throw error
-        }
+        guard session == nil else { throw CaptureFailure.message("摄像头正在录制或保存。") }
+        error = nil; status = "正在准备摄像头…"
+        guard await AVCaptureDevice.requestAccess(for: .video) else { throw CaptureFailure.message("请在系统设置 → 隐私与安全性 → 摄像头中允许录映。") }
+        guard let device = AVCaptureDevice.default(for: .video) else { throw CaptureFailure.message("未找到摄像头。") }
+        let input = try AVCaptureDeviceInput(device: device)
+        let capture = AVCaptureSession(), output = AVCaptureVideoDataOutput()
+        capture.beginConfiguration()
+        if capture.canSetSessionPreset(.hd1280x720) { capture.sessionPreset = .hd1280x720 }
+        guard capture.canAddInput(input), capture.canAddOutput(output) else { capture.commitConfiguration(); throw CaptureFailure.message("无法配置摄像头。") }
+        capture.addInput(input); capture.addOutput(output); capture.commitConfiguration()
+        output.alwaysDiscardsLateVideoFrames = true
+        let writer = CameraSink(url: outputURL)
+        writer.onFailure = { [weak self] text in Task { @MainActor in self?.error = text; self?.status = "摄像头录制异常" } }
+        output.setSampleBufferDelegate(writer, queue: queue)
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in queue.async { capture.startRunning(); continuation.resume() } }
+        guard capture.isRunning else { throw CaptureFailure.message("摄像头启动失败，可能被其他应用占用。") }
+        session = capture; sink = writer; currentURL = outputURL; isRecording = true; status = "摄像头录制中"
     }
-
-    /// Waits until the movie is finalized before returning a usable sidecar URL.
+    func beginTimeline(at time: CMTime) { queue.sync { sink?.origin = time } }
+    func setPaused(_ paused: Bool, at time: CMTime) { queue.sync { sink?.setPaused(paused, at: time) }; status = paused ? "摄像头已暂停" : "摄像头录制中" }
     func stop() async -> URL? {
-        guard currentURL != nil else { return nil }
-        status = "正在保存摄像头…"
-        return await withCheckedContinuation { continuation in
-            stopContinuations.append(continuation)
-            if movieOutput.isRecording { movieOutput.stopRecording() }
-        }
-    }
-
-    private func stopSession() {
-        let captureSession = session
-        sessionQueue.async { if captureSession.isRunning { captureSession.stopRunning() } }
-    }
-
-    private func recordingStarted() {
-        isRecording = true
-        status = "摄像头录制中"
-        startContinuation?.resume()
-        startContinuation = nil
-        // A stop request may arrive while AVCaptureMovieFileOutput is starting.
-        if !stopContinuations.isEmpty { movieOutput.stopRecording() }
-    }
-
-    private func recordingFinished(url: URL, failure: Error?) {
-        let nsError = failure as NSError?
-        let successful = failure == nil || (nsError?.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool == true)
-        let valid = successful && FileManager.default.fileExists(atPath: url.path)
-        if let continuation = startContinuation {
-            continuation.resume(throwing: failure ?? WebcamFailure.message("摄像头在开始录制前停止。"))
-            startContinuation = nil
-        }
-        isRecording = false
-        currentURL = nil
-        stopSession()
-        if valid {
-            status = "摄像头录制已保存"
-        } else {
-            error = failure?.localizedDescription ?? "摄像头视频保存失败。"
-            status = "摄像头保存失败"
-        }
-        let waiting = stopContinuations
-        stopContinuations.removeAll()
-        for continuation in waiting { continuation.resume(returning: valid ? url : nil) }
+        guard let session, let sink else { return nil }
+        let url = currentURL; self.session = nil; self.sink = nil; currentURL = nil; isRecording = false; status = "正在保存摄像头…"
+        let success = await withCheckedContinuation { continuation in queue.async { session.stopRunning(); sink.finish { continuation.resume(returning: $0) } } }
+        status = success ? "摄像头已保存" : "摄像头没有可用画面"
+        return success ? url : nil
     }
 }
 
-extension WebcamRecorder: AVCaptureFileOutputRecordingDelegate {
-    nonisolated func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL, from connections: [AVCaptureConnection]) {
-        Task { @MainActor [weak self] in self?.recordingStarted() }
+private final class CameraSink: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
+    var origin = CMTime.invalid
+    var onFailure: (@Sendable (String) -> Void)?
+    private let url: URL
+    private var writer: AVAssetWriter?
+    private var input: AVAssetWriterInput?
+    private var paused = false, failed = false
+    private var pauseStart = CMTime.zero, removed = CMTime.zero, boundary = CMTime.invalid
+    init(url: URL) { self.url = url }
+    func setPaused(_ value: Bool, at time: CMTime) {
+        guard paused != value else { return }; paused = value
+        if value { pauseStart = time } else { removed = removed + (time - pauseStart); boundary = time }
     }
-
-    nonisolated func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
-        Task { @MainActor [weak self] in self?.recordingFinished(url: outputFileURL, failure: error) }
+    func captureOutput(_ output: AVCaptureOutput, didOutput sample: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard !paused, !failed, origin.isValid, sample.isValid, sample.presentationTimeStamp >= origin else { return }
+        if boundary.isValid, sample.presentationTimeStamp < boundary { return }
+        guard let adjusted = removingPausedTime(sample, offset: removed) else { return }
+        do {
+            if writer == nil {
+                guard let description = sample.formatDescription else { return }
+                let dimensions = CMVideoFormatDescriptionGetDimensions(description)
+                let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+                let input = AVAssetWriterInput(mediaType: .video, outputSettings: [AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: Int(dimensions.width), AVVideoHeightKey: Int(dimensions.height)])
+                input.expectsMediaDataInRealTime = true
+                guard writer.canAdd(input) else { throw CaptureFailure.message("无法创建摄像头编码轨道。") }
+                writer.add(input)
+                guard writer.startWriting() else { throw writer.error ?? CaptureFailure.message("摄像头编码启动失败。") }
+                writer.startSession(atSourceTime: origin); self.writer = writer; self.input = input
+            }
+            if let input, input.isReadyForMoreMediaData, !input.append(adjusted) { throw writer?.error ?? CaptureFailure.message("摄像头写入失败。") }
+        } catch { failed = true; onFailure?(error.localizedDescription) }
     }
-}
-
-private enum WebcamFailure: LocalizedError {
-    case message(String)
-    var errorDescription: String? { if case .message(let message) = self { return message }; return nil }
+    func finish(completion: @escaping @Sendable (Bool) -> Void) {
+        guard let writer, writer.status == .writing else { writer?.cancelWriting(); completion(false); return }
+        input?.markAsFinished(); writer.finishWriting { completion(self.writer?.status == .completed) }
+    }
 }

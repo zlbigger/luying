@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Local FFmpeg video compositor for LuYing. No paid services."""
-import argparse, json, math, os, re, shutil, struct, subprocess, tempfile, zlib
+import argparse, json, math, os, re, shutil, struct, subprocess, tempfile, zlib, signal, sys, uuid
 from pathlib import Path
 
 def png(path,w,h,pixel):
@@ -8,9 +8,27 @@ def png(path,w,h,pixel):
     def chunk(kind,data): return struct.pack('!I',len(data))+kind+data+struct.pack('!I',zlib.crc32(kind+data)&0xffffffff)
     Path(path).write_bytes(b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('!2I5B',w,h,8,6,0,0,0))+chunk(b'IDAT',zlib.compress(raw))+chunk(b'IEND',b''))
 
-def run(argv):
-    result=subprocess.run(argv)
-    if result.returncode: raise RuntimeError('ffmpeg failed; inspect its diagnostic above')
+def event(**values):
+    print(json.dumps({'luying': True, **values}, ensure_ascii=False), flush=True)
+
+def run(argv, duration):
+    child = subprocess.Popen(argv, stdout=subprocess.PIPE, text=True)
+    try:
+        for line in child.stdout:
+            key, _, value = line.strip().partition('=')
+            if key == 'out_time_us':
+                try: event(phase='encoding', progress=min(.99, max(0, int(value)/1_000_000/duration)))
+                except ValueError: pass
+        if child.wait(): raise RuntimeError('媒体编码失败，请查看诊断信息')
+    finally:
+        if child.poll() is None:
+            child.terminate()
+            try: child.wait(timeout=5)
+            except subprocess.TimeoutExpired: child.kill(); child.wait()
+
+def interrupted(signum, frame):
+    raise KeyboardInterrupt
+signal.signal(signal.SIGTERM, interrupted)
 
 def probe(ffmpeg,path):
     tool=str(Path(ffmpeg).with_name('ffprobe'))
@@ -20,6 +38,8 @@ def main():
     p=argparse.ArgumentParser(description=__doc__,formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument('input',type=Path);p.add_argument('output',type=Path,help='MP4 or GIF destination')
     p.add_argument('--ffmpeg',default=shutil.which('ffmpeg') or '/opt/homebrew/bin/ffmpeg')
+    p.add_argument('--subtitle-renderer',type=Path,help='Precompiled native subtitle renderer')
+    p.add_argument('--encoder',choices=['libx264','h264_videotoolbox'],default='libx264')
     p.add_argument('--start',type=float,default=0,help='Trim start in source seconds')
     p.add_argument('--end',type=float,help='Trim end in source seconds')
     p.add_argument('--speed',type=float,default=1)
@@ -55,7 +75,7 @@ def main():
     if a.captions:
         available=subprocess.check_output([a.ffmpeg,'-hide_banner','-filters'],stderr=subprocess.DEVNULL,text=True)
         native_subtitles=' subtitles ' in available
-        if not native_subtitles and not shutil.which('swift'):p.error('captions require Swift/AppKit on macOS or a libass-enabled ffmpeg')
+        if not native_subtitles and not a.subtitle_renderer and not shutil.which('swift'):p.error('captions require Swift/AppKit on macOS or a libass-enabled ffmpeg')
     info=probe(a.ffmpeg,a.input);v=next((s for s in info['streams'] if s['codec_type']=='video'),None)
     if not v:p.error('input has no video stream')
     duration=float(info['format']['duration']);end=min(a.end if a.end is not None else duration,duration)
@@ -92,6 +112,7 @@ def main():
             mid=(lo+hi+1)//2
             return f'if(lt({time},{events[mid]["t"]:.4f}),{branch(lo,mid-1)},{branch(mid,hi)})'
         return branch(0,len(events)-1) if events else '0.5'
+    event(phase='preparing', progress=0)
     with tempfile.TemporaryDirectory(prefix='openscreen-export-') as temp:
         tmp=Path(temp);colors=a.background.split(',')
         try:rgb=[tuple(bytes.fromhex(c.lstrip('#'))) for c in colors];assert len(rgb)==2 and all(len(c)==3 for c in rgb)
@@ -166,7 +187,8 @@ def main():
             if not cues:p.error('SRT contains no captions in the output timeline')
             manifest=tmp/'captions.json';manifest.write_text(json.dumps(cues))
             subtitle_height=max(100,h//4)
-            subprocess.run(['swift',str(Path(__file__).with_name('subtitles.swift')),str(manifest),str(w),str(subtitle_height)],check=True)
+            renderer=[str(a.subtitle_renderer)] if a.subtitle_renderer else ['swift',str(Path(__file__).with_name('subtitles.swift'))]
+            subprocess.run(renderer+[str(manifest),str(w),str(subtitle_height)],check=True)
             for n,cue in enumerate(cues):
                 cmd+=['-loop','1','-framerate',str(a.fps),'-i',cue['path']]
                 label=f'caption{n}'
@@ -195,10 +217,23 @@ def main():
         script=tmp/'filters.txt';script.write_text(';\n'.join(filters))
         cmd+=['-filter_complex_script',str(script),'-map',f'[{last}]']
         if hasaudio and a.output.suffix.lower()!='.gif':cmd+=['-map','[audio]','-c:a','aac','-b:a','192k']
-        if a.output.suffix.lower()!='.gif':cmd+=['-c:v','libx264','-preset','medium','-crf',str(a.quality),'-pix_fmt','yuv420p','-movflags','+faststart']
-        cmd+=['-t',str(out_duration),str(a.output)];run(cmd)
-        summary=probe(a.ffmpeg,a.output)
+        if a.output.suffix.lower()!='.gif':
+            cmd+=['-c:v',a.encoder]
+            cmd+=['-preset','medium','-crf',str(a.quality)] if a.encoder=='libx264' else ['-allow_sw','1','-b:v','0','-q:v',str(max(1,min(100,100-a.quality*2)))]
+            cmd+=['-pix_fmt','yuv420p','-movflags','+faststart']
+        partial=a.output.with_name('.'+a.output.stem+'-'+uuid.uuid4().hex+'.partial'+a.output.suffix)
+        cmd+=['-progress','pipe:1','-nostats','-loglevel','warning','-t',str(out_duration),str(partial)]
+        try:
+            run(cmd,out_duration)
+            summary=probe(a.ffmpeg,partial)
+            if not any(s['codec_type']=='video' for s in summary['streams']):raise RuntimeError('导出文件没有视频轨道')
+            os.replace(partial,a.output)
+        finally:
+            partial.unlink(missing_ok=True)
+        event(phase='completed', progress=1)
         print(json.dumps({'output':str(a.output.resolve()),'duration':summary['format'].get('duration'),'dimensions':[w,h],'mouse_events':len(events),'clicks':len(clicks)},ensure_ascii=False))
 if __name__=='__main__':
     try:main()
+    except KeyboardInterrupt:
+        event(phase='cancelled'); raise SystemExit(130)
     except (RuntimeError,FileNotFoundError,subprocess.CalledProcessError) as exc:raise SystemExit(str(exc))

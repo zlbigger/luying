@@ -10,10 +10,13 @@ struct RecordingMetadata: Codable { let width: Int; let height: Int; let fps: In
 
 @MainActor
 final class CaptureEngine: NSObject, ObservableObject, SCContentSharingPickerObserver {
+    @Published var isSelecting = false
     @Published var isRecording = false
     @Published var isPaused = false
     @Published var isSaving = false
     @Published var isStarting = false
+    @Published var deviceStatus = ""
+    @Published var recoveredURL: URL?
     @Published var error: String?
     @Published var status = "准备录制"
     @Published var displays: [CaptureDisplay] = []
@@ -40,6 +43,8 @@ final class CaptureEngine: NSObject, ObservableObject, SCContentSharingPickerObs
 
     func selectSource(mode: String = "display") async -> Bool {
         guard !isRecording, pickerCompletion == nil else { return false }
+        isSelecting = true
+        defer { isSelecting = false }
         let picker = SCContentSharingPicker.shared
         if !pickerObserved { picker.add(self); pickerObserved = true }
         var configuration = SCContentSharingPickerConfiguration()
@@ -72,8 +77,30 @@ final class CaptureEngine: NSObject, ObservableObject, SCContentSharingPickerObs
         Task { @MainActor in self.error = error.localizedDescription; self.pickerCompletion?.resume(returning: false); self.pickerCompletion = nil }
     }
 
+    func refreshDeviceStatus() {
+        func description(_ status: AVAuthorizationStatus) -> String {
+            switch status { case .authorized: return "已允许"; case .denied: return "已拒绝"; case .restricted: return "受系统限制"; default: return "启用时请求授权" }
+        }
+        let mic: String
+        if #available(macOS 15.0, *) { mic = description(AVCaptureDevice.authorizationStatus(for: .audio)) }
+        else { mic = "需要 macOS 15+" }
+        let value = "麦克风：" + mic + " · 摄像头：" + description(AVCaptureDevice.authorizationStatus(for: .video))
+        if deviceStatus != value { deviceStatus = value }
+    }
+    private func recoverInterrupted(_ message: String) async {
+        guard isRecording else { return }
+        error = message
+        let recovered = await stop()
+        status = recovered == nil ? "录制中断，未能保存视频" : "录制中断，视频已恢复保存"
+        recoveredURL = recovered
+    }
+    func cancelSelection() {
+        SCContentSharingPicker.shared.isActive = false
+        pickerCompletion?.resume(returning: false); pickerCompletion = nil; isSelecting = false
+    }
     func clearSelectedSource() {
         guard !isRecording else { return }
+        if isSelecting { cancelSelection() }
         pickedFilter = nil; hasSelectedSource = false; selectedSourceName = "尚未选择"
     }
     func refreshSources() async throws {
@@ -85,11 +112,11 @@ final class CaptureEngine: NSObject, ObservableObject, SCContentSharingPickerObs
         }
     }
 
-    func start(displayID: CGDirectDisplayID? = nil, windowID: CGWindowID? = nil, microphone: Bool = false, systemAudio: Bool = true, sourceRect: CGRect? = nil, showCursor: Bool = true, fps: Int = 60, outputURL: URL) async throws {
+    func start(timelineStart: CMTime? = nil, displayID: CGDirectDisplayID? = nil, windowID: CGWindowID? = nil, microphone: Bool = false, systemAudio: Bool = true, sourceRect: CGRect? = nil, showCursor: Bool = true, fps: Int = 60, outputURL: URL) async throws {
         guard !isRecording, !isSaving, !isStarting else { throw CaptureFailure.message("录制正在进行或保存，请稍候。") }
         isStarting = true
         defer { isStarting = false }
-        error = nil
+        error = nil; recoveredURL = nil
         status = "正在准备录制…"
         if microphone {
             guard #available(macOS 15.0, *) else { throw CaptureFailure.message("麦克风录制需要 macOS 15 或更新版本。") }
@@ -137,34 +164,42 @@ final class CaptureEngine: NSObject, ObservableObject, SCContentSharingPickerObs
         config.excludesCurrentProcessAudio = true
         config.sampleRate = 48000; config.channelCount = 2
         if #available(macOS 15.0, *) { config.captureMicrophone = microphone }
-        let recordingSink = try RecordingSink(url: outputURL, width: width, height: height, microphone: microphone)
+        let origin = timelineStart ?? CMClockGetTime(CMClockGetHostTimeClock())
+        let recordingSink = try RecordingSink(origin: origin, url: outputURL, width: width, height: height, microphone: microphone)
         let capture = SCStream(filter: filter, configuration: config, delegate: recordingSink)
         try capture.addStreamOutput(recordingSink, type: .screen, sampleHandlerQueue: recordingSink.queue)
         if systemAudio { try capture.addStreamOutput(recordingSink, type: .audio, sampleHandlerQueue: recordingSink.queue) }
         if #available(macOS 15.0, *), microphone { try capture.addStreamOutput(recordingSink, type: .microphone, sampleHandlerQueue: recordingSink.queue) }
         recordingSink.onFailure = { [weak self] message in
-            Task { @MainActor in self?.error = message; self?.status = message; _ = await self?.stop() }
+            Task { @MainActor in
+                await self?.recoverInterrupted(message)
+            }
         }
         do { try await capture.startCapture() } catch { recordingSink.cancel(); status = "录制启动失败"; throw error }
         self.stream = capture; self.sink = recordingSink; self.outputURL = outputURL
-        cursorSamples = []; pausedDuration = 0; pausedAt = nil; isPaused = false; wasMouseDown = false; startDate = Date(); isRecording = true; status = "录制中"
+        cursorSamples = []; pausedDuration = 0; pausedAt = nil; isPaused = false; wasMouseDown = false; startDate = Date().addingTimeInterval(-max(0, CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()) - origin))); isRecording = true; status = "录制中"
         cursorTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.sampleCursor() }
         }
     }
 
-    func togglePause() {
+    func togglePause(at time: CMTime = CMClockGetTime(CMClockGetHostTimeClock())) {
         guard isRecording, let sink else { return }
         let now = Date()
         isPaused.toggle()
         if isPaused { pausedAt = now }
         else { pausedDuration += now.timeIntervalSince(pausedAt ?? now); pausedAt = nil }
-        sink.setPaused(isPaused)
+        sink.setPaused(isPaused, at: time)
         status = isPaused ? "已暂停" : "录制中"
     }
 
     private func sampleCursor() {
         guard let startDate, !isPaused else { return }
+        if cursorSamples.count % 150 == 0, let outputURL,
+           let capacity = try? outputURL.deletingLastPathComponent().resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage,
+           capacity < 128 * 1024 * 1024 {
+            Task { await recoverInterrupted("磁盘剩余空间不足，录制已停止并尝试保存。") }; return
+        }
         let point = NSEvent.mouseLocation
         // AppKit uses bottom-left global coordinates; ScreenCaptureKit uses top-left.
         let primaryHeight = NSScreen.screens.first?.frame.height ?? captureRect.height
@@ -211,13 +246,14 @@ private final class RecordingSink: NSObject, SCStreamOutput, SCStreamDelegate, @
     private let mic: AVAssetWriterInput?
     private var started = false
     private var firstTime = CMTime.invalid
+    private let origin: CMTime
+    private var failureReported = false
     private var paused = false
     private var pauseStart = CMTime.zero
     private var timeRemoved = CMTime.zero
     private var resumeBoundary = CMTime.invalid
 
-    func setPaused(_ value: Bool) {
-        let now = CMClockGetTime(CMClockGetHostTimeClock())
+    func setPaused(_ value: Bool, at now: CMTime) {
         queue.sync {
             guard self.paused != value else { return }
             self.paused = value
@@ -229,24 +265,11 @@ private final class RecordingSink: NSObject, SCStreamOutput, SCStreamDelegate, @
         }
     }
 
-    private func adjusted(_ sample: CMSampleBuffer) -> CMSampleBuffer? {
-        guard timeRemoved > .zero else { return sample }
-        var count = 0
-        guard CMSampleBufferGetSampleTimingInfoArray(sample, entryCount: 0, arrayToFill: nil, entriesNeededOut: &count) == noErr, count > 0 else { return nil }
-        var timings = Array(repeating: CMSampleTimingInfo(), count: count)
-        guard CMSampleBufferGetSampleTimingInfoArray(sample, entryCount: count, arrayToFill: &timings, entriesNeededOut: &count) == noErr else { return nil }
-        for index in timings.indices {
-            if timings[index].presentationTimeStamp.isValid { timings[index].presentationTimeStamp = timings[index].presentationTimeStamp - timeRemoved }
-            if timings[index].decodeTimeStamp.isValid { timings[index].decodeTimeStamp = timings[index].decodeTimeStamp - timeRemoved }
-        }
-        var copy: CMSampleBuffer?
-        guard CMSampleBufferCreateCopyWithNewTiming(allocator: kCFAllocatorDefault, sampleBuffer: sample, sampleTimingEntryCount: count, sampleTimingArray: &timings, sampleBufferOut: &copy) == noErr else { return nil }
-        return copy
-    }
     var onFailure: (@Sendable (String) -> Void)?
     var failureMessage: String? { writer.error?.localizedDescription }
 
-    init(url: URL, width: Int, height: Int, microphone: Bool) throws {
+    init(origin: CMTime, url: URL, width: Int, height: Int, microphone: Bool) throws {
+        self.origin = origin
         writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         video = AVAssetWriterInput(mediaType: .video, outputSettings: [AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: width, AVVideoHeightKey: height, AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: max(8_000_000, width * height * 6), AVVideoMaxKeyFrameIntervalKey: 60]])
         let audioSettings: [String: Any] = [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 48000, AVNumberOfChannelsKey: 2, AVEncoderBitRateKey: 192000]
@@ -263,21 +286,22 @@ private final class RecordingSink: NSObject, SCStreamOutput, SCStreamDelegate, @
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
         guard sample.isValid, !paused else { return }
         if resumeBoundary.isValid, sample.presentationTimeStamp < resumeBoundary { return }
-        guard let sample = adjusted(sample) else { return }
+        guard let sample = removingPausedTime(sample, offset: timeRemoved) else { return }
         if type == .screen {
             guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]], let raw = attachments.first?[.status] as? Int, SCFrameStatus(rawValue: raw) == .complete else { return }
             if !started {
-                guard writer.startWriting() else { onFailure?(failureMessage ?? "无法启动视频编码。"); return }
-                firstTime = sample.presentationTimeStamp
+                guard writer.startWriting() else { reportFailure(failureMessage ?? "无法启动视频编码。"); return }
+                firstTime = origin
                 writer.startSession(atSourceTime: firstTime); started = true
             }
         }
         guard started, sample.presentationTimeStamp >= firstTime, writer.status == .writing else { return }
         let input: AVAssetWriterInput?
         switch type { case .screen: input = video; case .audio: input = audio; default: input = mic }
-        if let input, input.isReadyForMoreMediaData, !input.append(sample) { onFailure?(failureMessage ?? "写入视频失败。") }
+        if let input, input.isReadyForMoreMediaData, !input.append(sample) { reportFailure(failureMessage ?? "写入视频失败。") }
     }
-    func stream(_ stream: SCStream, didStopWithError error: Error) { onFailure?(error.localizedDescription) }
+    func stream(_ stream: SCStream, didStopWithError error: Error) { queue.async { self.reportFailure(error.localizedDescription) } }
+    private func reportFailure(_ message: String) { guard !failureReported else { return }; failureReported = true; onFailure?(message) }
     func cancel() { writer.cancelWriting() }
     func finish() async -> Bool {
         await withCheckedContinuation { continuation in
@@ -288,4 +312,19 @@ private final class RecordingSink: NSObject, SCStreamOutput, SCStreamDelegate, @
             }
         }
     }
+}
+
+func removingPausedTime(_ sample: CMSampleBuffer, offset: CMTime) -> CMSampleBuffer? {
+    guard offset > .zero else { return sample }
+    var count = 0
+    guard CMSampleBufferGetSampleTimingInfoArray(sample, entryCount: 0, arrayToFill: nil, entriesNeededOut: &count) == noErr, count > 0 else { return nil }
+    var timings = Array(repeating: CMSampleTimingInfo(), count: count)
+    guard CMSampleBufferGetSampleTimingInfoArray(sample, entryCount: count, arrayToFill: &timings, entriesNeededOut: &count) == noErr else { return nil }
+    for index in timings.indices {
+        if timings[index].presentationTimeStamp.isValid { timings[index].presentationTimeStamp = timings[index].presentationTimeStamp - offset }
+        if timings[index].decodeTimeStamp.isValid { timings[index].decodeTimeStamp = timings[index].decodeTimeStamp - offset }
+    }
+    var copy: CMSampleBuffer?
+    guard CMSampleBufferCreateCopyWithNewTiming(allocator: kCFAllocatorDefault, sampleBuffer: sample, sampleTimingEntryCount: count, sampleTimingArray: &timings, sampleBufferOut: &copy) == noErr else { return nil }
+    return copy
 }

@@ -8,7 +8,7 @@
 
 录映是一个独立实现、采用 MIT 协议开源的 macOS 应用。无需账号、订阅或付费 API，所有已实现功能均免费开放。录制和媒体处理在本机完成。
 
-**当前为早期版本 v0.1.1**，适合试用和反馈。它不是 Screen Studio 的官方版本，也没有与原版完整功能及质量等价的承诺。
+**当前为早期版本 v0.2.0**，适合试用和反馈。它不是 Screen Studio 的官方版本，也没有与原版完整功能及质量等价的承诺。
 
 ## 功能
 
@@ -18,7 +18,7 @@
 | 区域录制 | 选择显示器后设置区域坐标与尺寸 |
 | 系统声音、麦克风 | 系统声音录制；macOS 15+ 支持独立麦克风音轨，导出时混音 |
 | 摄像头 | 录制独立摄像头视频，导出时叠加在画面右下角 |
-| 暂停与继续 | 屏幕及音频统一扣除暂停时长；摄像头开启时暂不支持暂停 |
+| 暂停与继续 | 屏幕、系统声音、麦克风与摄像头使用统一时间基准，支持同步暂停 |
 | 点击自动缩放 | 根据录制鼠标轨迹和点击位置生成缩放效果 |
 | 鼠标与点击提示 | 可隐藏原始鼠标，使用合成大圆点和点击提示环 |
 | 裁剪与变速 | 设置单个起止区间；界面支持 0.5×、1×、1.5×、2× |
@@ -26,29 +26,21 @@
 | 音频处理 | 普通 FFT 降噪、背景音乐循环与混音 |
 | 字幕 | 导入 SRT；Apple 本机语音识别生成字幕，取决于系统语言资源 |
 | 效果预览 | 本地生成最多 8 秒的效果预览；默认播放器显示原素材 |
-| 项目保存 | 保存／恢复素材路径与编辑参数，不复制素材 |
-| 导出 | 无水印 MP4／GIF；导出宽度可选 1280～3840 px |
+| 项目保存 | 手动保存项目；自动保存编辑参数，重启恢复上次编辑，不复制素材 |
+| 导出 | 无水印 MP4／GIF；宽度 1280～3840 px；百分比、预计剩余时间、取消、重试 |
+| 录制保护 | 权限状态、启动／保存互斥、磁盘空间检查、中断时尝试保存素材、任务期间退出保护 |
 
-真实显示器、窗口录制和暂停／继续已在开发机器验证；视频合成、双音轨混音、摄像头叠加与中英文字幕烧录用合成样本验证。实际摄像头、各麦克风设备和语音识别质量仍需更多设备测试。
+真实显示器、窗口录制和暂停／继续已在开发机器验证；完整安装包在不含外部工具的 PATH 下通过 MP4／GIF、字幕、摄像头叠加、导出取消和目标文件保护测试；摄像头暂停编码用合成帧验证。视频合成、双音轨混音与中英文字幕烧录用合成样本验证。实际摄像头、各麦克风设备和语音识别质量仍需更多设备测试。
 
 ## 安装
 
 **支持：Apple Silicon（M1 或更新），macOS 14+。麦克风录制需要 macOS 15+。Intel 暂无安装包。**
 
-1. 在 [Releases](https://github.com/zlbigger/luying/releases/latest) 下载 `LuYing-v0.1.1-macos-arm64.zip`。
+1. 在 [Releases](https://github.com/zlbigger/luying/releases/latest) 下载 `LuYing-v0.2.0-macos-arm64.zip`。
 2. 解压，将 `录映.app` 拖入「应用程序」。只保留这一份应用，避免 Spotlight 出现重复项。
-3. 安装导出所需依赖：Apple Command Line Tools（提供 Python 3 / Swift）及 FFmpeg / FFprobe：
+3. 打开「录映」，选择「显示器／窗口／区域」，点击「选择显示器…」或「选择窗口…」，在系统选择器确认共享，再开始录制。
 
-   ```bash
-   xcode-select --install
-   brew install ffmpeg
-   ```
-
-   `brew` 需要先按 [Homebrew 官方说明](https://brew.sh/) 安装。已有这些依赖可跳过。
-
-4. 打开「录映」，选择「显示器／窗口／区域」，点击「选择显示器…」或「选择窗口…」，在系统选择器确认共享，再开始录制。
-
-**安装包未捆绑 Python、Swift 或 FFmpeg，也没有 Apple Developer ID 签名与公证**，使用本地临时签名。若 Gatekeeper 阻止首次打开，请在「系统设置 → 隐私与安全性」使用系统提供的「仍要打开」流程。无需关闭系统安全保护。
+**完整版安装包已内含 Python 导出运行时、FFmpeg / FFprobe 和预编译字幕程序，用户无需安装 Homebrew 或开发工具。**安装包尚无 Apple Developer ID 签名与公证，使用本地临时签名。若 Gatekeeper 阻止首次打开，请在「系统设置 → 隐私与安全性」使用系统提供的「仍要打开」流程。无需关闭系统安全保护。
 
 麦克风、摄像头与语音识别在启用相应功能时分别请求授权。系统选择器授权的录制内容直接用于录屏，不在启动时反复请求全屏权限。
 
@@ -70,9 +62,9 @@ cd luying
 ./build.sh
 ```
 
-需要 Apple Silicon Mac 与 Command Line Tools。构建脚本会在临时目录编译、签名，并生成 `LuYing.zip`，不会在仓库里留下第二份可被 Spotlight 搜索到的 `.app`。
+构建者需要 Apple Silicon Mac、Command Line Tools 与 Python 3。首次构建会下载校验过的 FFmpeg 源码、建立 Python 虚拟环境并安装 PyInstaller，编译耗时数分钟。终端回归测试还需单独安装含 libx264 的 FFmpeg；这些均不是安装包用户的依赖。构建脚本会在临时目录编译、签名，并生成 `LuYing.zip`，不会在仓库里留下第二份可被 Spotlight 搜索到的 `.app`。
 
-运行合成媒体回归检查：`./scripts/smoke-test.sh`。
+运行合成媒体回归检查：`./scripts/smoke-test.sh`。摄像头暂停时间基准检查：`./scripts/test-capture-timing.sh`。完整安装包检查：`python3 scripts/test-package.py /path/to/录映.app`。
 
 本地导出也可以直接运行：
 
@@ -94,6 +86,6 @@ python3 exporter.py input.mov output.mp4 \
 
 ## 技术与许可
 
-SwiftUI + AppKit、ScreenCaptureKit、AVFoundation、Apple Speech、本机 Python 与 FFmpeg。源代码及自绘图标采用 [MIT](LICENSE)；FFmpeg 由用户独立安装，其许可依具体构建而定。
+SwiftUI + AppKit、ScreenCaptureKit、AVFoundation、Apple Speech、随包 Python 与 FFmpeg。H.264 导出使用 Apple VideoToolbox。源代码及自绘图标采用 [MIT](LICENSE)；随包 FFmpeg 动态库采用 LGPL 2.1+，Python 与其他组件使用各自许可证，见 [第三方组件说明](THIRD_PARTY_NOTICES.md)。Release 同时提供对应 FFmpeg 源码，构建参数公开。
 
 本仓库不包含其他商业应用的代码、二进制、模型、资源或用户录制文件。
