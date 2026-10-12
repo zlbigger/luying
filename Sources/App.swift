@@ -7,12 +7,15 @@ import UniformTypeIdentifiers
 struct OpenScreenStudioApp: App {
     @NSApplicationDelegateAdaptor(StudioAppDelegate.self) private var delegate
     @State private var showingAbout = false
+    @StateObject private var preview = LargePreviewModel()
     var body: some Scene {
         Window("录映", id: "studio") {
-            StudioView().frame(minWidth: 1050, minHeight: 820)
+            StudioView().environmentObject(preview).frame(minWidth: 1050, minHeight: 820)
                 .sheet(isPresented: $showingAbout) { AboutLuYingView() }
         }.windowStyle(.titleBar)
         .commands { CommandGroup(replacing: .appInfo) { Button("关于录映") { showingAbout = true } } }
+        Window("放大预览", id: "large-preview") { LargePreviewView().environmentObject(preview) }.defaultSize(width: 1000, height: 640)
+
     }
 }
 struct StudioView: View {
@@ -22,6 +25,8 @@ struct StudioView: View {
     @StateObject private var timeline = TimelineModel()
     @StateObject private var transcriber = Transcriber()
     @State private var showingAbout = false
+    @EnvironmentObject private var preview: LargePreviewModel
+    @Environment(\.openWindow) private var openWindow
     @State private var locale = "zh-CN"
     @State private var outputWidth = 1920
     @State private var background = "#18233f,#7849b8"
@@ -98,7 +103,15 @@ struct StudioView: View {
                     if let player { NativeVideoPlayer(player: player).padding(24) }
                     else { VStack(spacing: 14) { Image(systemName: "video.badge.waveform").font(.system(size: 52)); Text("把操作录成好看的视频").font(.title2); Text("录制完成后即可预览、裁剪和导出").foregroundStyle(.secondary) } }
                 }.frame(height:220)
-                if let video { Text((showingEffects ? "效果预览 · " : "原始素材预览 · ") + video.lastPathComponent).font(.caption).foregroundStyle(.secondary) }
+                if let video {
+                    HStack {
+                        Text((showingEffects ? "效果预览 · " : "原始素材预览 · ") + video.lastPathComponent).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        Spacer()
+                        Button("放大预览", systemImage: "arrow.up.left.and.arrow.down.right") {
+                            if let player { preview.prepare(player: player);openWindow(id: "large-preview") }
+                        }.disabled(player == nil || capture.isRecording || exporting).help("打开大窗口预览，可自行切换全屏")
+                    }
+                }
                 if video != nil {
                     Picker("编辑工作区",selection:$editTab) { Text("剪辑").tag("剪辑");Text("缩放").tag("缩放");Text("画布与声音").tag("画布") }.pickerStyle(.segmented)
                     if editTab != "画布" { TimelineView(model:timeline,speed:speed,video:video,mode:editTab,seek:seekSource,notify:{ message=$0 }).disabled(exporting || capture.isRecording || recordingBusy || capture.isSaving) }
