@@ -1,0 +1,9 @@
+.DS_Store
+__pycache__/
+*.pyc
+*.app/
+*.zip
+*.mov
+*.mp4
+*.gif
+*.ossproject
