@@ -73,7 +73,7 @@ struct StudioView: View {
                 Toggle("录制摄像头", isOn: $webcam).disabled(capture.isRecording || capture.isSaving || capture.isStarting || recordingBusy || capture.isSelecting)
                 Toggle("显示原始鼠标", isOn: $cursor).disabled(capture.isRecording || capture.isSaving || capture.isStarting || recordingBusy || capture.isSelecting)
                 Picker("帧率", selection: $fps) { Text("30 fps").tag(30); Text("60 fps").tag(60) }.disabled(capture.isRecording || recordingBusy)
-                Text(microphone && !supportsMicrophone ? "麦克风需要 macOS 15+" : (capture.hasSelectedSource ? "录制内容已授权" : "请通过系统选择器选择内容")).font(.caption).foregroundStyle(.secondary)
+                Text(microphone && !supportsMicrophone ? "麦克风需要 macOS 15+" : (capture.hasSelectedSource ? "录制内容已授权" : "请先选择并确认录制来源")).font(.caption).foregroundStyle(.secondary)
                 Button(action: { Task { await record() } }) {
                     Label(capture.isRecording ? "停止录制 · \(elapsed)s" : "开始录制", systemImage: capture.isRecording ? "stop.fill" : "record.circle")
                         .frame(maxWidth: .infinity).padding(8)
@@ -121,7 +121,7 @@ struct StudioView: View {
                 if exporter.canRetry && !exporting { Button("重试上次导出") { exporter.retry() }.disabled(capture.isRecording || recordingBusy) }
                 Text(exporter.message.isEmpty ? message : exporter.message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).lineLimit(4)
             }.padding(26)
-        }.sheet(isPresented: $showingAbout) { AboutLuYingView() }.onChange(of: capture.isRecording || capture.isSaving || recordingBusy || exporting, initial: true) { _, busy in AppActivity.shared.busy = busy }
+        }.sheet(isPresented: $showingAbout) { AboutLuYingView() }.sheet(isPresented: $capture.isConfirmingSource) { RecordingSourceView(capture: capture) }.onChange(of: capture.isRecording || capture.isSaving || recordingBusy || exporting, initial: true) { _, busy in AppActivity.shared.busy = busy }
         .onChange(of: video) { _, url in
             timeline.observe(player,source:!showingEffects)
         }
@@ -145,7 +145,7 @@ struct StudioView: View {
     }
     private var supportsMicrophone: Bool { if #available(macOS 15.0, *) { return true }; return false }
     func selectRecordingSource() async {
-        if await capture.selectSource(mode: source) { message = "已选择：\(capture.selectedSourceName)。可以开始录制。" }
+        if await capture.selectSource(mode: source) { message = "已选择：\(capture.selectedSourceName)。可以开始录制。" } else { message = capture.status }
     }
     func refresh() async { do { try await capture.refreshSources() } catch { message = error.localizedDescription } }
     func record() async {

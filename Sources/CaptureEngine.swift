@@ -3,14 +3,24 @@ import AVFoundation
 import ScreenCaptureKit
 import Combine
 
+struct RecordingSource: Identifiable { let id: String; let name: String; let filter: SCContentFilter; let frame: CGRect }
+
 struct CaptureDisplay: Identifiable { let id: CGDirectDisplayID; let name: String; let width: Int; let height: Int }
 struct CaptureWindow: Identifiable { let id: CGWindowID; let name: String; let application: String }
 struct CursorSample: Codable { let time: Double; let x: Double; let y: Double; let kind: String }
 struct RecordingMetadata: Codable { let width: Int; let height: Int; let fps: Int; let duration: Double; let events: [CursorSample] }
 
 @MainActor
-final class CaptureEngine: NSObject, ObservableObject, SCContentSharingPickerObserver {
+final class CaptureEngine: NSObject, ObservableObject {
     @Published var isSelecting = false
+    @Published var isConfirmingSource = false
+    @Published var sourceChoices: [RecordingSource] = []
+    @Published var pendingSourceID: String?
+    @Published var sourcePreview: NSImage?
+    @Published var previewStatus = ""
+    private var pendingSource: RecordingSource?
+    private var selectedFrame: CGRect?
+    private var previewTask: Task<Void, Never>?
     @Published var isRecording = false
     @Published var isPaused = false
     @Published var isSaving = false
@@ -26,7 +36,6 @@ final class CaptureEngine: NSObject, ObservableObject, SCContentSharingPickerObs
     private var selectedMode = "display"
     private var pickedFilter: SCContentFilter?
     private var pickerCompletion: CheckedContinuation<Bool, Never>?
-    private var pickerObserved = false
     private var stream: SCStream?
     private var sink: RecordingSink?
     private var outputURL: URL?
@@ -45,36 +54,31 @@ final class CaptureEngine: NSObject, ObservableObject, SCContentSharingPickerObs
         guard !isRecording, pickerCompletion == nil else { return false }
         isSelecting = true
         defer { isSelecting = false }
-        let picker = SCContentSharingPicker.shared
-        if !pickerObserved { picker.add(self); pickerObserved = true }
-        var configuration = SCContentSharingPickerConfiguration()
         selectedMode = mode
-        configuration.allowedPickerModes = mode == "window" ? [.singleWindow] : [.singleDisplay]
-        picker.defaultConfiguration = configuration
-        picker.isActive = true
-        return await withCheckedContinuation { completion in
-            pickerCompletion = completion
-            picker.present(using: mode == "window" ? .window : .display)
+        do {
+                let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+                if mode == "window" {
+                    sourceChoices = content.windows.filter { $0.frame.width > 100 && $0.frame.height > 100 && $0.owningApplication?.processID != ProcessInfo.processInfo.processIdentifier }.map {
+                        RecordingSource(id: "window-\($0.windowID)", name: ($0.owningApplication?.applicationName ?? "应用") + " — " + ($0.title ?? "无标题窗口"), filter: SCContentFilter(desktopIndependentWindow: $0), frame: $0.frame)
+                    }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+                } else {
+                    sourceChoices = content.displays.map { display in
+                        let screen = NSScreen.screens.first { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == display.displayID }
+                        let name = (screen?.localizedName ?? "显示器") + " · \(display.width)×\(display.height) · ID \(display.displayID)"
+                        let excluded = content.applications.filter { $0.processID == ProcessInfo.processInfo.processIdentifier }
+                        return RecordingSource(id: "display-\(display.displayID)", name: name, filter: SCContentFilter(display: display, excludingApplications: excluded, exceptingWindows: []), frame: display.frame)
+                    }
+                }
+                guard !sourceChoices.isEmpty else { status = "没有可录制的来源";return false }
+                pendingSource = nil;pendingSourceID = nil;sourcePreview = nil;previewStatus = "请先点击要录制的来源"
+                return await withCheckedContinuation { pickerCompletion = $0;isConfirmingSource = true }
+        } catch {
+            self.error = error.localizedDescription
+            if (error as NSError).domain == "com.apple.ScreenCaptureKit.SCStreamErrorDomain" && (error as NSError).code == -3801 {
+                status = "系统拒绝录屏访问。若权限已开启，可能是更新后的授权记录失效：在屏幕与系统音频录制中移除旧录映，再添加应用程序里的录映并重开。"
+            } else { status = "无法读取录制来源：\(error.localizedDescription)" }
+            return false
         }
-    }
-    nonisolated func contentSharingPicker(_ picker: SCContentSharingPicker, didCancelFor stream: SCStream?) {
-        Task { @MainActor in self.pickerCompletion?.resume(returning: false); self.pickerCompletion = nil }
-    }
-    nonisolated func contentSharingPicker(_ picker: SCContentSharingPicker, didUpdateWith filter: SCContentFilter, for stream: SCStream?) {
-        Task { @MainActor in
-            self.pickedFilter = filter
-            self.hasSelectedSource = true
-            self.selectedSourceName = self.selectedMode == "window" ? "已选择窗口" : "已选择显示器"
-            if #available(macOS 15.2, *) {
-                if self.selectedMode == "window", let window = filter.includedWindows.first { self.selectedSourceName = (window.owningApplication?.applicationName ?? "应用") + " — " + (window.title ?? "窗口") }
-                else if let display = filter.includedDisplays.first { self.selectedSourceName = "显示器 \(display.displayID) · \(display.width)×\(display.height)" }
-            }
-            self.status = "已选择系统授权的录制内容"
-            self.pickerCompletion?.resume(returning: true); self.pickerCompletion = nil
-        }
-    }
-    nonisolated func contentSharingPickerStartDidFailWithError(_ error: Error) {
-        Task { @MainActor in self.error = error.localizedDescription; self.pickerCompletion?.resume(returning: false); self.pickerCompletion = nil }
     }
 
     func refreshDeviceStatus() {
@@ -94,14 +98,37 @@ final class CaptureEngine: NSObject, ObservableObject, SCContentSharingPickerObs
         status = recovered == nil ? "录制中断，未能保存视频" : "录制中断，视频已恢复保存"
         recoveredURL = recovered
     }
+    func choosePendingSource(_ source: RecordingSource) {
+        pendingSource = source;pendingSourceID = source.id;sourcePreview = nil;previewStatus = "正在读取所选来源的预览…"
+        previewTask?.cancel()
+        previewTask = Task {
+            let config = SCStreamConfiguration()
+            let size = source.filter.contentRect.size
+            config.width = 640;config.height = max(2,Int(640 * size.height / max(1,size.width)));config.showsCursor = false
+            do {
+                let image = try await SCScreenshotManager.captureImage(contentFilter: source.filter, configuration: config)
+                guard !Task.isCancelled, pendingSourceID == source.id else { return }
+                sourcePreview = NSImage(cgImage:image,size:.zero);previewStatus = "请核对预览，再确认录制此来源"
+            } catch {
+                guard !Task.isCancelled, pendingSourceID == source.id else { return }
+                previewStatus = "预览不可用，请重新选择来源：\(error.localizedDescription)"
+            }
+        }
+    }
+    func confirmSource() {
+        guard let source = pendingSource, sourcePreview != nil, pickerCompletion != nil else { return }
+        pickedFilter = source.filter;selectedFrame = source.frame;hasSelectedSource = true;selectedSourceName = source.name
+        status = "已确认录制来源";isConfirmingSource = false
+        pickerCompletion?.resume(returning:true);pickerCompletion = nil
+    }
     func cancelSelection() {
-        SCContentSharingPicker.shared.isActive = false
+        previewTask?.cancel();isConfirmingSource = false;pendingSource = nil;pendingSourceID = nil
         pickerCompletion?.resume(returning: false); pickerCompletion = nil; isSelecting = false
     }
     func clearSelectedSource() {
         guard !isRecording else { return }
         if isSelecting { cancelSelection() }
-        pickedFilter = nil; hasSelectedSource = false; selectedSourceName = "尚未选择"
+        pickedFilter = nil; selectedFrame = nil; hasSelectedSource = false; selectedSourceName = "尚未选择"
     }
     func refreshSources() async throws {
         guard CGPreflightScreenCaptureAccess() else { throw CaptureFailure.message("系统尚未允许直接枚举屏幕。请使用「系统选择录制内容」；无需反复打开权限设置。") }
@@ -125,7 +152,7 @@ final class CaptureEngine: NSObject, ObservableObject, SCContentSharingPickerObs
         let filter: SCContentFilter
         if let pickedFilter {
             filter = pickedFilter
-            captureRect = pickedFilter.contentRect
+            captureRect = selectedFrame ?? pickedFilter.contentRect
         } else {
             guard CGPreflightScreenCaptureAccess() else { throw CaptureFailure.message("请先点击「系统选择录制内容」选择屏幕或窗口。") }
         let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
@@ -135,7 +162,7 @@ final class CaptureEngine: NSObject, ObservableObject, SCContentSharingPickerObs
             captureRect = window.frame
         } else {
             let selectedDisplay = displayID.flatMap { id in content.displays.first(where: { $0.displayID == id }) }
-            guard let display = displayID == nil ? content.displays.first : selectedDisplay else { throw CaptureFailure.message("所选显示器不可用，请重新选择。") }
+            guard let display = selectedDisplay else { throw CaptureFailure.message("所选显示器不可用，请重新选择。") }
             let excluded = content.applications.filter { $0.processID == ProcessInfo.processInfo.processIdentifier }
             filter = SCContentFilter(display: display, excludingApplications: excluded, exceptingWindows: [])
             captureRect = display.frame
