@@ -6,7 +6,14 @@ import UniformTypeIdentifiers
 @main
 struct OpenScreenStudioApp: App {
     @NSApplicationDelegateAdaptor(StudioAppDelegate.self) private var delegate
-    var body: some Scene { Window("录映", id: "studio") { StudioView().frame(minWidth: 1050, minHeight: 820) }.windowStyle(.titleBar) }
+    @State private var showingAbout = false
+    var body: some Scene {
+        Window("录映", id: "studio") {
+            StudioView().frame(minWidth: 1050, minHeight: 820)
+                .sheet(isPresented: $showingAbout) { AboutLuYingView() }
+        }.windowStyle(.titleBar)
+        .commands { CommandGroup(replacing: .appInfo) { Button("关于录映") { showingAbout = true } } }
+    }
 }
 struct StudioView: View {
     @StateObject private var capture = CaptureEngine()
@@ -14,6 +21,7 @@ struct StudioView: View {
     @StateObject private var exporter = ExportController()
     @StateObject private var timeline = TimelineModel()
     @StateObject private var transcriber = Transcriber()
+    @State private var showingAbout = false
     @State private var locale = "zh-CN"
     @State private var outputWidth = 1920
     @State private var background = "#18233f,#7849b8"
@@ -79,6 +87,8 @@ struct StudioView: View {
                 if let video { Button("在 Finder 中显示", systemImage: "arrow.up.forward.square") { NSWorkspace.shared.activateFileViewerSelecting([video]) } }
                 Spacer()
                 Text("macOS 原生录制引擎\n所有已实现功能均免费开放").font(.caption).foregroundStyle(.secondary)
+                Link("by zlbigger.com", destination: URL(string: "https://zlbigger.com")!).font(.caption)
+                Button("关于录映 · 支持作者") { showingAbout = true }.buttonStyle(.link).font(.caption)
             }.padding(24).frame(width: 300).background(Color(nsColor: .windowBackgroundColor))
             Divider()
             VStack(alignment: .leading, spacing: 18) {
@@ -111,7 +121,7 @@ struct StudioView: View {
                 if exporter.canRetry && !exporting { Button("重试上次导出") { exporter.retry() }.disabled(capture.isRecording || recordingBusy) }
                 Text(exporter.message.isEmpty ? message : exporter.message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).lineLimit(4)
             }.padding(26)
-        }.onChange(of: capture.isRecording || capture.isSaving || recordingBusy || exporting, initial: true) { _, busy in AppActivity.shared.busy = busy }
+        }.sheet(isPresented: $showingAbout) { AboutLuYingView() }.onChange(of: capture.isRecording || capture.isSaving || recordingBusy || exporting, initial: true) { _, busy in AppActivity.shared.busy = busy }
         .onChange(of: video) { _, url in
             timeline.observe(player,source:!showingEffects)
         }
@@ -233,4 +243,28 @@ struct StudioProject: Codable {
     let video: String; let webcam: String?; let captions: String?
     let start: String; let end: String; let speed: Double; let aspect: String; let padding: Double
     let zoom: Bool; let clicks: Bool; let fps: Int; let width: Int; let background: String; let denoise: Bool?; let music: String?; let backgroundImage: String?; let recordedCursor: Bool?; let timeline: TimelineEdit?
+}
+
+struct AboutLuYingView: View {
+    @Environment(\.dismiss) private var dismiss
+    private let repository = URL(string: "https://github.com/zlbigger/luying")!
+    private let reward = URL(string: "https://www.praybuddha.com/generated/diamond-sutra-immersive/reward-qr.png")!
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("录映 · LuYing").font(.title.bold())
+            Text("版本 \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")").foregroundStyle(.secondary)
+            Text("免费的 macOS 录屏与视频美化工具。\n本地录制、时间线剪辑、平滑缩放、字幕与无水印导出。")
+                .multilineTextAlignment(.center)
+            Link("by zlbigger.com", destination: URL(string: "https://zlbigger.com")!)
+            Link("开源地址：github.com/zlbigger/luying", destination: repository)
+            Divider()
+            Text("喜欢录映？欢迎打赏支持作者").font(.headline)
+            if let url = Bundle.main.url(forResource: "reward-qr", withExtension: "png"), let image = NSImage(contentsOf: url) {
+                Image(nsImage: image).resizable().interpolation(.none).scaledToFit().frame(width: 220, height: 220).accessibilityLabel("作者打赏二维码")
+            }
+            Link("打开打赏码", destination: reward)
+            Text("打赏完全自愿，所有已实现功能均免费开放。").font(.caption).foregroundStyle(.secondary)
+            Button("完成") { dismiss() }.keyboardShortcut(.defaultAction)
+        }.padding(28).frame(width: 460)
+    }
 }

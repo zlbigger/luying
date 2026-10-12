@@ -2,13 +2,14 @@
   <img src="assets/icon.png" width="112" alt="录映 LuYing 图标" />
   <h1>录映 · LuYing</h1>
   <p>免费的 macOS 录屏与视频美化工具。</p>
+  <p>by <a href="https://zlbigger.com">zlbigger.com</a></p>
   <p>本地录制 · 点击自动缩放 · 字幕 · 无水印导出</p>
   <p><a href="https://github.com/zlbigger/luying/releases/latest">下载安装包</a> · <a href="docs/USAGE.md">使用说明</a> · <a href="https://github.com/zlbigger/luying/issues">反馈问题</a></p>
 </div>
 
 录映是一个独立实现、采用 MIT 协议开源的 macOS 应用。无需账号、订阅或付费 API，所有已实现功能均免费开放。录制和媒体处理在本机完成。
 
-**当前为早期版本 v0.3.0**，适合试用和反馈。它不是 Screen Studio 的官方版本，也没有与原版完整功能及质量等价的承诺。
+**当前为早期版本 v0.3.1**，适合试用和反馈。它不是 Screen Studio 的官方版本，也没有与原版完整功能及质量等价的承诺。
 
 ## 功能
 
@@ -36,7 +37,7 @@
 
 **支持：Apple Silicon（M1 或更新），macOS 14+。麦克风录制需要 macOS 15+。Intel 暂无安装包。**
 
-1. 在 [Releases](https://github.com/zlbigger/luying/releases/latest) 下载 `LuYing-v0.3.0-macos-arm64.zip`。
+1. 在 [Releases](https://github.com/zlbigger/luying/releases/latest) 下载 `LuYing-v0.3.1-macos-arm64.zip`。
 2. 解压，将 `录映.app` 拖入「应用程序」。只保留这一份应用，避免 Spotlight 出现重复项。
 3. 打开「录映」，选择「显示器／窗口／区域」，点击「选择显示器…」或「选择窗口…」，在系统选择器确认共享，再开始录制。
 
@@ -89,3 +90,13 @@ python3 exporter.py input.mov output.mp4 \
 SwiftUI + AppKit、ScreenCaptureKit、AVFoundation、Apple Speech、随包 Python 与 FFmpeg。H.264 导出使用 Apple VideoToolbox。源代码及自绘图标采用 [MIT](LICENSE)；随包 FFmpeg 动态库采用 LGPL 2.1+，Python 与其他组件使用各自许可证，见 [第三方组件说明](THIRD_PARTY_NOTICES.md)。Release 同时提供对应 FFmpeg 源码，构建参数公开。
 
 本仓库不包含其他商业应用的代码、二进制、模型、资源或用户录制文件。
+
+## 支持作者
+
+by [zlbigger.com](https://zlbigger.com) · 开源地址：[github.com/zlbigger/luying](https://github.com/zlbigger/luying)
+
+打赏完全自愿，所有已实现功能均免费开放。软件「关于录映 · 支持作者」中可查看打赏码。
+
+<img src="assets/reward-qr.png" width="220" alt="作者打赏二维码" />
+
+[打开打赏码](https://www.praybuddha.com/generated/diamond-sutra-immersive/reward-qr.png)

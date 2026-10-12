@@ -8,6 +8,7 @@ BUILD_TEMP=$(mktemp -d "${TMPDIR:-/tmp}/luying-build.XXXXXX")
 APP="$BUILD_TEMP/录映.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 xcrun swiftc -O -swift-version 5 -target arm64-apple-macosx14.0 Sources/*.swift -o "$APP/Contents/MacOS/OpenScreenStudio"
+cp assets/reward-qr.png "$APP/Contents/Resources/"
 cp LuYing.icns "$APP/Contents/Resources/"
 cp exporter.py "$APP/Contents/Resources/"
 TOOLS="$APP/Contents/Resources/Tools"
@@ -32,7 +33,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIdentifier</key><string>local.openscreenstudio.app</string>
 <key>CFBundleExecutable</key><string>OpenScreenStudio</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.3.0</string>
+<key>CFBundleShortVersionString</key><string>0.3.1</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSSpeechRecognitionUsageDescription</key><string>在本机识别录制音频并生成字幕，不上传音频。</string>
