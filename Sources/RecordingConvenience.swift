@@ -83,13 +83,44 @@ final class RecordingMenu: NSObject, ObservableObject {
         if let eventHandler { RemoveEventHandler(eventHandler) };eventHandler = nil
         shortcutStatus = "录制时：⌘⇧P 暂停／继续 · ⌘⇧S 停止并保存"
     }
+    private var controls: NSPanel?
+    private let controlTime = NSTextField(labelWithString: "● 00:00")
+    private let pauseButton = NSButton(title: "暂停", target: nil, action: nil)
+    private let stopButton = NSButton(title: "结束保存", target: nil, action: nil)
+    private func updateControls(paused: Bool, seconds: Int) {
+        if controls == nil {
+            let panel = NSPanel(contentRect: NSRect(x:0,y:0,width:310,height:64),styleMask:[.titled],backing:.buffered,defer:false)
+            panel.title = "录制控制 · 录映";panel.level = .floating
+            panel.hidesOnDeactivate = false;panel.isReleasedWhenClosed = false
+            panel.collectionBehavior = [.canJoinAllSpaces,.fullScreenAuxiliary]
+            controlTime.font = .monospacedDigitSystemFont(ofSize:15,weight:.medium)
+            pauseButton.target = self;pauseButton.action = #selector(togglePause);pauseButton.bezelStyle = .rounded
+            stopButton.target = self;stopButton.action = #selector(finishRecording);stopButton.bezelStyle = .rounded
+            stopButton.contentTintColor = .systemRed
+            let stack = NSStackView(views:[controlTime,pauseButton,stopButton])
+            stack.orientation = .horizontal;stack.spacing = 12;stack.alignment = .centerY
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            let content = NSView();panel.contentView = content;content.addSubview(stack)
+            NSLayoutConstraint.activate([stack.centerXAnchor.constraint(equalTo:content.centerXAnchor),stack.centerYAnchor.constraint(equalTo:content.centerYAnchor)])
+            if let screen = NSApp.keyWindow?.screen ?? NSScreen.main {
+                let area = screen.visibleFrame
+                panel.setFrameOrigin(NSPoint(x:area.midX - 155,y:area.maxY - 110))
+            } else { panel.center() }
+            controls = panel;panel.makeKeyAndOrderFront(nil)
+        }
+        controlTime.stringValue = (paused ? "Ⅱ " : "● ") + String(format:"%02d:%02d",seconds / 60,seconds % 60)
+        controlTime.textColor = paused ? .secondaryLabelColor : .systemRed
+        pauseButton.title = paused ? "继续" : "暂停"
+        pauseButton.toolTip = "暂停／继续 · ⌘⇧P";stopButton.toolTip = "结束并保存 · ⌘⇧S"
+    }
     private var item: NSStatusItem?
     private var menuState = ""
     var pause: (() -> Void)?
     var stop: (() -> Void)?
     func update(recording: Bool, paused: Bool, seconds: Int, source: String) {
-        guard recording else { if shortcutsActive { unregisterShortcuts() };if let item { NSStatusBar.system.removeStatusItem(item) };item = nil;menuState = "";return }
+        guard recording else { controls?.close();controls = nil;pauseButton.isEnabled = true;stopButton.isEnabled = true;if shortcutsActive { unregisterShortcuts() };if let item { NSStatusBar.system.removeStatusItem(item) };item = nil;menuState = "";return }
         registerShortcuts()
+        updateControls(paused:paused,seconds:seconds)
         if item == nil { item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength) }
         item?.button?.title = (paused ? "Ⅱ " : "● ") + String(format: "%02d:%02d", seconds / 60, seconds % 60)
         item?.button?.toolTip = "录映 · " + source
@@ -103,6 +134,6 @@ final class RecordingMenu: NSObject, ObservableObject {
         item?.menu = menu
     }
     @objc private func togglePause() { pause?() }
-    @objc private func finishRecording() { stop?() }
+    @objc private func finishRecording() { pauseButton.isEnabled = false;stopButton.isEnabled = false;stop?() }
     @objc private func showStudio() { NSApp.activate(ignoringOtherApps: true);NSApp.windows.first { $0.identifier?.rawValue == "studio" }?.makeKeyAndOrderFront(nil) }
 }
