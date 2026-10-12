@@ -6,12 +6,40 @@ final class WebcamRecorder: NSObject, ObservableObject {
     @Published private(set) var isRecording = false
     @Published private(set) var status = "摄像头待机"
     @Published private(set) var error: String?
-    private var session: AVCaptureSession?
+    @Published private(set) var session: AVCaptureSession?
+    private var previewToken = UUID()
     private var sink: CameraSink?
     private let queue = DispatchQueue(label: "LuYing.camera")
     private var currentURL: URL?
 
+    func startPreview() async {
+        guard session == nil, !isRecording else { return }
+        previewToken = UUID();let token = previewToken
+        error = nil;status = "正在开启摄像头预览…"
+        guard await AVCaptureDevice.requestAccess(for: .video) else { error = "摄像头未授权";status = "摄像头未授权";return }
+        guard token == previewToken else { return }
+        do {
+            guard let device = AVCaptureDevice.default(for: .video) else { throw CaptureFailure.message("未找到摄像头") }
+            let input = try AVCaptureDeviceInput(device: device), capture = AVCaptureSession()
+            capture.beginConfiguration()
+            if capture.canSetSessionPreset(.hd1280x720) { capture.sessionPreset = .hd1280x720 }
+            guard capture.canAddInput(input) else { capture.commitConfiguration();throw CaptureFailure.message("无法开启摄像头") }
+            capture.addInput(input);capture.commitConfiguration()
+            await withCheckedContinuation { (c: CheckedContinuation<Void,Never>) in queue.async { capture.startRunning();c.resume() } }
+            guard token == previewToken else { queue.async { capture.stopRunning() };return }
+            guard capture.isRunning else { throw CaptureFailure.message("摄像头启动失败") }
+            session = capture;status = "摄像头预览 · 尚未录制"
+        } catch { self.error = error.localizedDescription;status = "摄像头预览失败" }
+    }
+    func stopPreview() async {
+        previewToken = UUID()
+        guard !isRecording, let capture = session else { return }
+        session = nil
+        await withCheckedContinuation { (c: CheckedContinuation<Void,Never>) in queue.async { capture.stopRunning();c.resume() } }
+        status = "摄像头已关闭"
+    }
     func start(outputURL: URL) async throws {
+        await stopPreview()
         guard session == nil else { throw CaptureFailure.message("摄像头正在录制或保存。") }
         error = nil; status = "正在准备摄像头…"
         guard await AVCaptureDevice.requestAccess(for: .video) else { throw CaptureFailure.message("请在系统设置 → 隐私与安全性 → 摄像头中允许录映。") }

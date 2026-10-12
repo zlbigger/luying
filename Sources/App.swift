@@ -19,6 +19,7 @@ struct OpenScreenStudioApp: App {
     }
 }
 struct StudioView: View {
+    @State private var cameraPreview = CameraPreviewPanel()
     @StateObject private var micCheck = MicrophoneCheck()
     @State private var recordingMenu = RecordingMenu()
     @AppStorage("hideWorkbenchWhenRecording") private var hideWorkbench = true
@@ -84,6 +85,10 @@ struct StudioView: View {
                 }
                 Toggle("录制时收起工作台", isOn: $hideWorkbench).font(.caption).disabled(capture.isRecording)
                 Toggle("录制摄像头", isOn: $webcam).disabled(capture.isRecording || capture.isSaving || capture.isStarting || recordingBusy || capture.isSelecting)
+                if webcam {
+                    Text(camera.status).font(.caption).foregroundStyle(camera.error == nil ? Color.secondary : Color.red)
+                    Button("显示摄像头预览") { cameraPreview.show(camera: camera) }.font(.caption)
+                }
                 Toggle("显示原始鼠标", isOn: $cursor).disabled(capture.isRecording || capture.isSaving || capture.isStarting || recordingBusy || capture.isSelecting)
                 Picker("帧率", selection: $fps) { Text("30 fps").tag(30); Text("60 fps").tag(60) }.disabled(capture.isRecording || recordingBusy)
                 Text(microphone && !supportsMicrophone ? "麦克风需要 macOS 15+" : (capture.hasSelectedSource ? "录制内容已授权" : "请先选择并确认录制来源")).font(.caption).foregroundStyle(.secondary)
@@ -117,6 +122,7 @@ struct StudioView: View {
                     else { VStack(spacing: 14) { Image(systemName: "video.badge.waveform").font(.system(size: 52)); Text("把操作录成好看的视频").font(.title2); Text("录制完成后即可预览、裁剪和导出").foregroundStyle(.secondary) } }
                 }.frame(height:220)
                 if let video {
+                    if webcamURL != nil { Text(showingEffects ? "已叠加摄像头画面" : "摄像头单独保存 · 在效果预览和导出中叠加").font(.caption).foregroundStyle(.secondary) }
                     HStack {
                         Text((showingEffects ? "效果预览 · " : "原始素材预览 · ") + video.lastPathComponent).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         Spacer()
@@ -161,6 +167,10 @@ struct StudioView: View {
     }
     private var recordingLifecycle: some View {
         workbench
+        .onChange(of: webcam) { _, enabled in
+            if enabled { cameraPreview.show(camera: camera);Task { await camera.startPreview() } }
+            else { cameraPreview.close();Task { await camera.stopPreview() } }
+        }
         .onChange(of: microphone) { _, enabled in
             if enabled && supportsMicrophone && !capture.isRecording { Task { await micCheck.start() } } else { micCheck.stop() }
         }
@@ -188,7 +198,7 @@ struct StudioView: View {
             if showingEffects, let video { showingEffects=false;player=AVPlayer(url:video) }
             do { let url = recoveryURL; try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true); try data.write(to: url, options: .atomic) }
             catch { message = "自动保存编辑参数失败，请手动保存项目：\(error.localizedDescription)" }
-        }.onChange(of: camera.error) { _, error in if let error { message = "摄像头异常：\(error)。屏幕录制继续。" } }
+        }.onChange(of: camera.error) { _, error in if let error { message = "摄像头异常：\(error)。" + (capture.isRecording ? "屏幕录制继续。" : "请检查设备或授权。") } }
         .onChange(of: exporter.completedURL) { _, url in
             guard let url else { return }
             if exporter.completedPreview { player = AVPlayer(url: url); showingEffects = true }
@@ -217,7 +227,7 @@ struct StudioView: View {
         if capture.isRecording {
             let saved = await capture.stop()
             if let saved { video = saved; timeline.load(saved) }
-            if webcam { webcamURL = await camera.stop() }
+            if webcam { webcamURL = await camera.stop();Task { await camera.startPreview() } }
             if let saved { player = AVPlayer(url: saved); showingEffects = false; message = "录制已保存。设置裁剪、画布和效果，然后导出。" }
             else { message = capture.error ?? "保存失败" }
             return
@@ -237,9 +247,9 @@ struct StudioView: View {
             let origin = CMClockGetTime(CMClockGetHostTimeClock())
             camera.beginTimeline(at: origin)
             try await capture.start(timelineStart: origin, displayID: displayID == 0 ? nil : displayID, windowID: nil, microphone: microphone, systemAudio: systemAudio, sourceRect: crop, showCursor: cursor, fps: fps, outputURL: destination)
-            recordedCursor = cursor; elapsed = 0;updateRecordingMenu();if hideWorkbench { NSApp.hide(nil) }
+            recordedCursor = cursor; elapsed = 0;updateRecordingMenu();if hideWorkbench { NSApp.windows.filter { $0.identifier?.rawValue == "studio" || $0.identifier?.rawValue == "large-preview" }.forEach { $0.orderOut(nil) } }
              message = "正在录制；停止后保存至 Movies/OpenScreenStudio。"
-        } catch { if webcam { _ = await camera.stop() }; message = error.localizedDescription }
+        } catch { if webcam { _ = await camera.stop();Task { await camera.startPreview() } }; message = error.localizedDescription }
     }
     private var recoveryURL: URL { FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("LuYing/Recovery.ossproject") }
     private var currentProject: StudioProject? {
