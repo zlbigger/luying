@@ -47,7 +47,7 @@ def main():
     p.add_argument('--zoom-scenes-json',help='Editable source-time zoom scenes as JSON')
     p.add_argument('--preview-duration',type=float,help='Limit retained output duration')
     p.add_argument('--speed',type=float,default=1)
-    p.add_argument('--aspect',choices=['source','16:9','9:16','1:1','4:3'],default='16:9')
+    p.add_argument('--aspect',choices=['original','source','16:9','9:16','1:1','4:3'],default='16:9')
     p.add_argument('--width',type=int,default=1920);p.add_argument('--height',type=int,help='Overrides aspect preset')
     p.add_argument('--padding',type=int,default=80);p.add_argument('--radius',type=int,default=24)
     p.add_argument('--background-image',type=Path,help='Image background, scaled to cover the output frame')
@@ -86,8 +86,13 @@ def main():
     if end<=a.start:p.error('end must be greater than start and inside source duration')
     ranges=retained_ranges(a.start,end,json.loads(a.cuts_json),a.speed,a.preview_duration)
     out_duration=sum(b-a for a,b in ranges)/a.speed
+    if a.aspect=='original':
+        a.padding=0;a.radius=0;a.no_shadow=True
+        a.background_image=None
+        a.width=v['width'] if a.preview_duration is None else min(a.width,v['width'])
+        a.height=round(a.width*v['height']/v['width'])
     w=a.width//2*2
-    ratio=v['width']/v['height'] if a.aspect=='source' else float(a.aspect.split(':')[0])/float(a.aspect.split(':')[1])
+    ratio=v['width']/v['height'] if a.aspect in ('source','original') else float(a.aspect.split(':')[0])/float(a.aspect.split(':')[1])
     h=(a.height or round(w/ratio))//2*2
     availw,availh=w-2*a.padding,h-2*a.padding
     if min(availw,availh)<32:p.error('padding leaves no room for video')

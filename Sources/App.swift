@@ -45,7 +45,7 @@ struct StudioView: View {
     @State private var captionsURL: URL?
     @State private var player: AVPlayer?
     @State private var speed = 1.0
-    @State private var aspect = "16:9"
+    @State private var aspect = "original"
     @State private var padding = 60.0
     @State private var zoom = true
     @State private var clicks = true
@@ -107,8 +107,9 @@ struct StudioView: View {
                 if video == nil || editTab == "画布" {
                 GroupBox("编辑与画布") {
                     VStack(spacing: 12) {
-                        HStack { Picker("画布", selection: $aspect) { ForEach(["16:9","9:16","1:1","4:3"], id: \.self) { Text($0).tag($0) } }; Text("边距 \(Int(padding))"); Slider(value: $padding, in: 0...160) }
-                        HStack { Picker("导出宽度", selection: $outputWidth) { Text("1280 px").tag(1280); Text("1920 px").tag(1920); Text("2560 px").tag(2560); Text("3840 px").tag(3840) }; Picker("背景", selection: $background) { Text("紫夜").tag("#18233f,#7849b8"); Text("海蓝").tag("#083344,#0891b2"); Text("暖橙").tag("#7c2d12,#fb923c"); Text("深灰").tag("#18181b,#3f3f46") } }
+                        HStack { Picker("画布", selection: $aspect) { Text("原始尺寸").tag("original"); ForEach(["16:9","9:16","1:1","4:3"], id: \.self) { Text($0).tag($0) } }; if aspect != "original" { Text("边距 \(Int(padding))"); Slider(value: $padding, in: 0...160) } }
+                        if aspect == "original" { Text("保持原视频像素尺寸，不加背景、边距、圆角或阴影。").font(.caption).foregroundStyle(.secondary) }
+                        else { HStack { Picker("导出宽度", selection: $outputWidth) { Text("1280 px").tag(1280); Text("1920 px").tag(1920); Text("2560 px").tag(2560); Text("3840 px").tag(3840) }; Picker("背景", selection: $background) { Text("紫夜").tag("#18233f,#7849b8"); Text("海蓝").tag("#083344,#0891b2"); Text("暖橙").tag("#7c2d12,#fb923c"); Text("深灰").tag("#18181b,#3f3f46") } } }
                         HStack { Toggle("点击自动缩放", isOn: $zoom); Toggle("点击提示", isOn: $clicks); Spacer(); Button(captionsURL == nil ? "导入 SRT 字幕…" : "已选择字幕") { captionsURL = chooseFile(types: ["srt"]) } }
                     HStack { Toggle("音频降噪", isOn: $denoise); Button(musicURL == nil ? "背景音乐…" : "更换背景音乐…") { musicURL = chooseFile(types: ["mp3","m4a","wav","aiff"]) }; Button(backgroundImageURL == nil ? "背景图片…" : "更换背景图片…") { backgroundImageURL = chooseFile(types: ["png","jpg","jpeg","heic"]) }; if musicURL != nil || backgroundImageURL != nil { Button("清除") { musicURL = nil; backgroundImageURL = nil } } }
                     HStack { Picker("字幕语言", selection: $locale) { Text("中文").tag("zh-CN"); Text("English").tag("en-US") }.frame(width: 155); Button(transcriber.isWorking ? "识别中…" : "生成本地字幕") { Task { guard let video else { return }; do { captionsURL = try await transcriber.transcribe(video: video, locale: locale); message = "字幕已生成：\(captionsURL!.lastPathComponent)" } catch { message = error.localizedDescription } } }.disabled(video == nil || transcriber.isWorking || recordingBusy || capture.isSaving); Spacer() }
