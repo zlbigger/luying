@@ -6,6 +6,9 @@ from timeline import retained_ranges, read_events, retime_events, auto_scenes, v
 
 def png(path,w,h,pixel):
     raw=b''.join(b'\0'+b''.join(bytes(pixel(x,y)) for x in range(w)) for y in range(h))
+    png_raw(path,w,h,raw)
+
+def png_raw(path,w,h,raw):
     def chunk(kind,data): return struct.pack('!I',len(data))+kind+data+struct.pack('!I',zlib.crc32(kind+data)&0xffffffff)
     Path(path).write_bytes(b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('!2I5B',w,h,8,6,0,0,0))+chunk(b'IDAT',zlib.compress(raw))+chunk(b'IEND',b''))
 
@@ -116,8 +119,13 @@ def main():
         tmp=Path(temp);colors=a.background.split(',')
         try:rgb=[tuple(bytes.fromhex(c.lstrip('#'))) for c in colors];assert len(rgb)==2 and all(len(c)==3 for c in rgb)
         except Exception:p.error('background must be two #RRGGBB colors')
-        png(tmp/'bg.png',w,h,lambda x,y:tuple(round(rgb[0][k]*(1-(x/w+y/h)/2)+rgb[1][k]*(x/w+y/h)/2) for k in range(3))+(255,))
-        cmd=[a.ffmpeg,'-hide_banner','-y','-i',str(a.input),'-loop','1','-framerate',str(a.fps),'-i',str(a.background_image or tmp/'bg.png')]
+        direct_canvas = a.aspect == 'original'
+        cmd=[a.ffmpeg,'-hide_banner','-y','-i',str(a.input)]
+        if not direct_canvas:
+            # A smooth gradient does not require a full output-resolution bitmap.
+            png(tmp/'bg.png',256,256,lambda x,y:tuple(round(rgb[0][k]*(1-(x/256+y/256)/2)+rgb[1][k]*(x/256+y/256)/2) for k in range(3))+(255,))
+            cmd+=['-loop','1','-framerate',str(a.fps),'-i',str(a.background_image or tmp/'bg.png')]
+        idx=1 if direct_canvas else 2
         subtitle_path=a.captions
         if a.captions and not a.captions_output_timeline:
             def srt_seconds(value):
@@ -146,10 +154,27 @@ def main():
             filters.append(f"[{screen}]zoompan=z='{zx}':x='iw*({cx})':y='ih*({cy})':d=1:s={cw}x{ch}:fps={a.fps}[zoomed]");screen='zoomed'
         r=min(a.radius,cw//2,ch//2)
         if r>0:
-            alpha=f'if(lte(pow(max({r}-X,0)+max(X-(W-{r}-1),0),2)+pow(max({r}-Y,0)+max(Y-(H-{r}-1),0),2),{r*r}),255,0)'
-            filters.append(f"[{screen}]format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{alpha}'[rounded]");screen='rounded'
-        filters.append(f'[1:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setpts=PTS-STARTPTS'+('' if a.no_shadow else f',drawbox=x={ox+12}:y={oy+16}:w={cw}:h={ch}:color=black@0.28:t=fill')+'[bg]')
-        filters.append(f'[bg][{screen}]overlay=x={ox}:y={oy}:shortest=1[composite]');last='composite';idx=2
+            # Only the corner pixels differ; build a static alpha mask once.
+            def mask_pixel(x,y):
+                dx=max(r-x,0)+max(x-(cw-r-1),0)
+                dy=max(r-y,0)+max(y-(ch-r-1),0)
+                alpha=255 if dx*dx+dy*dy<=r*r else 0
+                return (255,255,255,alpha)
+            opaque=b'\xff\xff\xff\xff'
+            rows=[]
+            for y in range(ch):
+                if r<=y<ch-r: row=opaque*cw
+                else: row=b''.join(bytes(mask_pixel(x,y)) for x in range(r))+opaque*(cw-2*r)+b''.join(bytes(mask_pixel(x,y)) for x in range(cw-r,cw))
+                rows.append(b'\0'+row)
+            png_raw(tmp/'mask.png',cw,ch,b''.join(rows))
+            cmd+=['-loop','1','-framerate',str(a.fps),'-i',str(tmp/'mask.png')]
+            filters.append(f'[{idx}:v]alphaextract[mask]');idx+=1
+            filters.append(f'[{screen}][mask]alphamerge=shortest=1[rounded]');screen='rounded'
+        if direct_canvas:
+            last=screen
+        else:
+            filters.append(f'[1:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setpts=PTS-STARTPTS'+('' if a.no_shadow else f',drawbox=x={ox+12}:y={oy+16}:w={cw}:h={ch}:color=black@0.28:t=fill')+'[bg]')
+            filters.append(f'[bg][{screen}]overlay=x={ox}:y={oy}:shortest=1[composite]');last='composite'
         def displayed(axis):
             coordinate=position(axis)
             if not frames:return coordinate
