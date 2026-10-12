@@ -19,6 +19,10 @@ struct OpenScreenStudioApp: App {
     }
 }
 struct StudioView: View {
+    @StateObject private var micCheck = MicrophoneCheck()
+    @State private var recordingMenu = RecordingMenu()
+    @AppStorage("hideWorkbenchWhenRecording") private var hideWorkbench = true
+    @State private var lastExport: URL?
     @StateObject private var capture = CaptureEngine()
     @StateObject private var camera = WebcamRecorder()
     @StateObject private var exporter = ExportController()
@@ -61,8 +65,7 @@ struct StudioView: View {
     @State private var message = "选择录制来源，或导入已有视频开始编辑。"
     @State private var elapsed = 0
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
-    var body: some View {
-        HStack(spacing: 0) {
+    private var recordingSidebar: some View {
             VStack(alignment: .leading, spacing: 20) {
                 Label("录映", systemImage: "record.circle").font(.title2.bold())
                 Text("本地录制 · 免费导出 · 无水印").foregroundStyle(.secondary)
@@ -75,6 +78,11 @@ struct StudioView: View {
                 if source == "region" { TextField("区域 x,y,宽,高（逻辑像素）", text: $region); Text("先选择显示器，再设置显示器内的录制区域。").font(.caption).foregroundStyle(.secondary) }
                 Toggle("录制系统声音", isOn: $systemAudio).disabled(capture.isRecording || capture.isSaving || capture.isStarting || recordingBusy || capture.isSelecting)
                 Toggle("录制麦克风", isOn: $microphone).disabled(capture.isRecording || capture.isSaving || capture.isStarting || recordingBusy || capture.isSelecting)
+                if microphone && supportsMicrophone && !capture.isRecording && !recordingBusy {
+                    ProgressView(value: micCheck.level).tint(.green)
+                    Text(micCheck.status).font(.caption).foregroundStyle(.secondary)
+                }
+                Toggle("录制时收起工作台", isOn: $hideWorkbench).font(.caption).disabled(capture.isRecording)
                 Toggle("录制摄像头", isOn: $webcam).disabled(capture.isRecording || capture.isSaving || capture.isStarting || recordingBusy || capture.isSelecting)
                 Toggle("显示原始鼠标", isOn: $cursor).disabled(capture.isRecording || capture.isSaving || capture.isStarting || recordingBusy || capture.isSelecting)
                 Picker("帧率", selection: $fps) { Text("30 fps").tag(30); Text("60 fps").tag(60) }.disabled(capture.isRecording || recordingBusy)
@@ -95,6 +103,11 @@ struct StudioView: View {
                 Link("by zlbigger.com", destination: URL(string: "https://zlbigger.com")!).font(.caption)
                 Button("关于录映 · 支持作者") { showingAbout = true }.buttonStyle(.link).font(.caption)
             }.padding(24).frame(width: 300).background(Color(nsColor: .windowBackgroundColor))
+    }
+    private var workbench: some View {
+        HStack(spacing: 0) {
+            recordingSidebar
+
             Divider()
             VStack(alignment: .leading, spacing: 18) {
                 HStack { Text("创作工作台").font(.title.bold()); Spacer(); Text("LOCAL / FREE").font(.caption.bold()).foregroundStyle(.indigo) }
@@ -132,10 +145,38 @@ struct StudioView: View {
                 Spacer(minLength:0)
                 HStack { Picker("格式", selection: $format) { Text("MP4").tag("mp4"); Text("GIF").tag("gif") }.frame(width: 140); Spacer(); Button("效果预览") { exportVideo(preview: true) }.disabled(video == nil || exporting || capture.isRecording || recordingBusy || capture.isSaving);  Button(exporting ? "正在导出…" : "导出视频…", systemImage: "square.and.arrow.up") { exportVideo() }.buttonStyle(.borderedProminent).disabled(video == nil || exporting || capture.isRecording || recordingBusy || capture.isSaving) }
                 if exporting { VStack(alignment: .leading, spacing: 6) { ProgressView(value: exporter.progress); HStack { Text(exporter.phase); Text(exporter.remaining).foregroundStyle(.secondary); Spacer(); Button("取消导出") { exporter.cancel() } } }.font(.caption) }
+                if let lastExport, !exporting {
+                    HStack {
+                        Button("复制成片文件", systemImage: "doc.on.doc") {
+                            guard FileManager.default.fileExists(atPath: lastExport.path) else { message = "成片已移动或删除";return }
+                            NSPasteboard.general.clearContents();NSPasteboard.general.writeObjects([lastExport as NSURL]);message = "已复制文件，可粘贴到聊天或邮件。"
+                        }
+                        Button("打开成片位置") { NSWorkspace.shared.activateFileViewerSelecting([lastExport]) }
+                    }
+                }
                 if exporter.canRetry && !exporting { Button("重试上次导出") { exporter.retry() }.disabled(capture.isRecording || recordingBusy) }
                 Text(exporter.message.isEmpty ? message : exporter.message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).lineLimit(4)
             }.padding(26)
-        }.sheet(isPresented: $showingAbout) { AboutLuYingView() }.sheet(isPresented: $capture.isConfirmingSource) { RecordingSourceView(capture: capture) }.onChange(of: capture.isRecording || capture.isSaving || recordingBusy || exporting, initial: true) { _, busy in AppActivity.shared.busy = busy }
+        }
+    }
+    private var recordingLifecycle: some View {
+        workbench
+        .onChange(of: microphone) { _, enabled in
+            if enabled && supportsMicrophone && !capture.isRecording { Task { await micCheck.start() } } else { micCheck.stop() }
+        }
+        .onChange(of: capture.isRecording) { _, active in
+            if !active {
+                recordingMenu.update(recording: false, paused: false, seconds: elapsed, source: capture.selectedSourceName)
+                NSApp.activate(ignoringOtherApps: true)
+                NSApp.windows.first { $0.identifier?.rawValue == "studio" }?.makeKeyAndOrderFront(nil)
+                if microphone { Task { await micCheck.start() } }
+            }
+        }
+        .onChange(of: capture.isPaused) { _, _ in updateRecordingMenu() }
+
+    }
+    var body: some View {
+        recordingLifecycle.sheet(isPresented: $showingAbout) { AboutLuYingView() }.sheet(isPresented: $capture.isConfirmingSource) { RecordingSourceView(capture: capture) }.onChange(of: capture.isRecording || capture.isSaving || recordingBusy || exporting, initial: true) { _, busy in AppActivity.shared.busy = busy }
         .onChange(of: video) { _, url in
             timeline.observe(player,source:!showingEffects)
         }
@@ -151,11 +192,18 @@ struct StudioView: View {
         .onChange(of: exporter.completedURL) { _, url in
             guard let url else { return }
             if exporter.completedPreview { player = AVPlayer(url: url); showingEffects = true }
-            else { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+            else { lastExport = url }
         }.onChange(of: capture.recoveredURL) { _, url in
             guard let url else { return }
             Task { if webcam { webcamURL = await camera.stop() }; video = url; timeline.load(url); player = AVPlayer(url: url); showingEffects = false; message = "录制被中断，已保存可恢复的视频。" }
-        }.task { capture.refreshDeviceStatus(); restoreRecovery(); if video == nil { message = "选择录制类型，再点击选择按钮。" } }.onReceive(timer) { _ in capture.refreshDeviceStatus(); if capture.isRecording && !capture.isPaused { elapsed += 1 } }
+        }.task { capture.refreshDeviceStatus(); restoreRecovery(); if video == nil { message = "选择录制类型，再点击选择按钮。" } }.onReceive(timer) { _ in capture.refreshDeviceStatus(); if capture.isRecording && !capture.isPaused { elapsed += 1 };updateRecordingMenu() }
+    }
+    func updateRecordingMenu() {
+        recordingMenu.pause = {
+            let time = CMClockGetTime(CMClockGetHostTimeClock());capture.togglePause(at: time);camera.setPaused(capture.isPaused, at: time)
+        }
+        recordingMenu.stop = { Task { await record() } }
+        recordingMenu.update(recording: capture.isRecording, paused: capture.isPaused, seconds: elapsed, source: capture.selectedSourceName)
     }
     private var supportsMicrophone: Bool { if #available(macOS 15.0, *) { return true }; return false }
     func selectRecordingSource() async {
@@ -164,6 +212,7 @@ struct StudioView: View {
     func refresh() async { do { try await capture.refreshSources() } catch { message = error.localizedDescription } }
     func record() async {
         guard !recordingBusy else { return }
+        micCheck.stop();preview.syncBack()
         recordingBusy = true; defer { recordingBusy = false }
         if capture.isRecording {
             let saved = await capture.stop()
@@ -188,7 +237,8 @@ struct StudioView: View {
             let origin = CMClockGetTime(CMClockGetHostTimeClock())
             camera.beginTimeline(at: origin)
             try await capture.start(timelineStart: origin, displayID: displayID == 0 ? nil : displayID, windowID: nil, microphone: microphone, systemAudio: systemAudio, sourceRect: crop, showCursor: cursor, fps: fps, outputURL: destination)
-            recordedCursor = cursor; elapsed = 0; message = "正在录制；停止后保存至 Movies/OpenScreenStudio。"
+            recordedCursor = cursor; elapsed = 0;updateRecordingMenu();if hideWorkbench { NSApp.hide(nil) }
+             message = "正在录制；停止后保存至 Movies/OpenScreenStudio。"
         } catch { if webcam { _ = await camera.stop() }; message = error.localizedDescription }
     }
     private var recoveryURL: URL { FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("LuYing/Recovery.ossproject") }
