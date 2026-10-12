@@ -2,6 +2,7 @@
 """Local FFmpeg video compositor for LuYing. No paid services."""
 import argparse, json, math, os, re, shutil, struct, subprocess, tempfile, zlib, signal, sys, uuid
 from pathlib import Path
+from timeline import retained_ranges, read_events, retime_events, auto_scenes, validate_scenes, camera_frames, expression, montage_filter
 
 def png(path,w,h,pixel):
     raw=b''.join(b'\0'+b''.join(bytes(pixel(x,y)) for x in range(w)) for y in range(h))
@@ -42,6 +43,9 @@ def main():
     p.add_argument('--encoder',choices=['libx264','h264_videotoolbox'],default='libx264')
     p.add_argument('--start',type=float,default=0,help='Trim start in source seconds')
     p.add_argument('--end',type=float,help='Trim end in source seconds')
+    p.add_argument('--cuts-json',default='[]',help='Deleted source intervals as JSON')
+    p.add_argument('--zoom-scenes-json',help='Editable source-time zoom scenes as JSON')
+    p.add_argument('--preview-duration',type=float,help='Limit retained output duration')
     p.add_argument('--speed',type=float,default=1)
     p.add_argument('--aspect',choices=['source','16:9','9:16','1:1','4:3'],default='16:9')
     p.add_argument('--width',type=int,default=1920);p.add_argument('--height',type=int,help='Overrides aspect preset')
@@ -80,7 +84,8 @@ def main():
     if not v:p.error('input has no video stream')
     duration=float(info['format']['duration']);end=min(a.end if a.end is not None else duration,duration)
     if end<=a.start:p.error('end must be greater than start and inside source duration')
-    out_duration=(end-a.start)/a.speed
+    ranges=retained_ranges(a.start,end,json.loads(a.cuts_json),a.speed,a.preview_duration)
+    out_duration=sum(b-a for a,b in ranges)/a.speed
     w=a.width//2*2
     ratio=v['width']/v['height'] if a.aspect=='source' else float(a.aspect.split(':')[0])/float(a.aspect.split(':')[1])
     h=(a.height or round(w/ratio))//2*2
@@ -88,25 +93,14 @@ def main():
     if min(availw,availh)<32:p.error('padding leaves no room for video')
     scale=min(availw/v['width'],availh/v['height']);cw=int(v['width']*scale)//2*2;ch=int(v['height']*scale)//2*2
     ox,oy=(w-cw)//2,(h-ch)//2
-    events=[]
-    if a.mouse:
-        data=json.loads(a.mouse.read_text());raw=data if isinstance(data,list) else data.get('events',[])
-        mw=data.get('width',1) if isinstance(data,dict) else 1;mh=data.get('height',1) if isinstance(data,dict) else 1
-        raw=sorted(raw,key=lambda e:float(e.get('time',e.get('t',0))))
-        preceding=[e for e in raw if float(e.get('time',e.get('t',0)))<a.start]
-        if preceding:
-            e=dict(preceding[-1]);e['time']=a.start;e['kind']='move';e['type']='move';e['click']=False;raw.insert(0,e)
-        for e in raw:
-            t=float(e.get('time',e.get('t',0)))
-            if a.start<=t<=end:
-                x=float(e['x']);y=float(e['y'])
-                if x>1 or y>1:x/=mw;y/=mh
-                events.append({'t':(t-a.start)/a.speed,'x':max(0,min(1,x)),'y':max(0,min(1,y)),'click':e.get('kind',e.get('type')) in ('click','mousedown') or e.get('click',False)})
-        events.sort(key=lambda e:e['t'])
+    source_events=read_events(json.loads(a.mouse.read_text())) if a.mouse else []
+    events=retime_events(source_events,ranges,a.speed)
     clicks=[e for e in events if e['click']][:80]
     if len(events)>800:events=events[::math.ceil(len(events)/800)]
+    scenes=validate_scenes(json.loads(a.zoom_scenes_json),duration) if a.zoom_scenes_json is not None else auto_scenes(source_events,duration,a.zoom,a.zoom_duration)
+    frames=camera_frames(scenes,ranges,a.speed,a.fps,out_duration) if scenes and a.zoom>1 else []
+    zx=expression([f[0] for f in frames]);cx=expression([f[1] for f in frames]);cy=expression([f[2] for f in frames])
     def position(axis,time='t'):
-        # Binary decisions keep expression nesting logarithmic for long recordings.
         def branch(lo,hi):
             if lo==hi:return f'{events[lo][axis]:.6f}'
             mid=(lo+hi+1)//2
@@ -131,17 +125,20 @@ def main():
             for block in re.split(r'\n\s*\n',a.captions.read_text(encoding='utf-8-sig').replace('\r\n','\n').strip()):
                 lines=block.splitlines();timing=next((n for n,line in enumerate(lines) if '-->' in line),None)
                 if timing is None:continue
-                begin,finish=lines[timing].split('-->',1);begin=(srt_seconds(begin.strip())-a.start)/a.speed;finish=(srt_seconds(finish.strip().split()[0])-a.start)/a.speed
-                if finish<=0 or begin>=out_duration:continue
-                rewritten.append(f'{len(rewritten)+1}\n{srt_time(begin)} --> {srt_time(min(out_duration,finish))}\n'+ '\n'.join(lines[timing+1:]))
-            if not rewritten:p.error('SRT contains no captions in the selected source interval')
-            subtitle_path=tmp/'retimed.srt';subtitle_path.write_text('\n\n'.join(rewritten)+'\n')
-        filters=[f'[0:v]trim=start={a.start}:end={end},setpts=(PTS-STARTPTS)/{a.speed},fps={a.fps},scale={cw}:{ch}[screen0]']
+                begin,finish=lines[timing].split('-->',1);begin=srt_seconds(begin.strip());finish=srt_seconds(finish.strip().split()[0])
+                elapsed=0
+                for left,right in ranges:
+                    lo,hi=max(left,begin),min(right,finish)
+                    if hi>lo:rewritten.append(f'{len(rewritten)+1}\n{srt_time((elapsed+lo-left)/a.speed)} --> {srt_time((elapsed+hi-left)/a.speed)}\n'+'\n'.join(lines[timing+1:]))
+                    elapsed+=right-left
+            if rewritten:
+                subtitle_path=tmp/'retimed.srt';subtitle_path.write_text('\n\n'.join(rewritten)+'\n')
+            else:subtitle_path=None
+        filters=montage_filter('0:v','v',ranges,a.speed,'screenJoin')
+        filters.append(f'[screenJoin]fps={a.fps},scale={cw}:{ch}[screen0]')
         screen='screen0'
-        if clicks and a.zoom>1:
-            strength='+'.join(f'({a.zoom-1})*max(0,1-abs(on/{a.fps}-{e["t"]:.4f})/{a.zoom_duration/2})' for e in clicks)
-            z=f'min({a.zoom},1+{strength})';x=position('x',f'on/{a.fps}');y=position('y',f'on/{a.fps}')
-            filters.append(f"[{screen}]zoompan=z='{z}':x='max(0,min(iw-iw/zoom,iw*({x})-iw/zoom/2))':y='max(0,min(ih-ih/zoom,ih*({y})-ih/zoom/2))':d=1:s={cw}x{ch}:fps={a.fps}[zoomed]");screen='zoomed'
+        if frames:
+            filters.append(f"[{screen}]zoompan=z='{zx}':x='iw*({cx})':y='ih*({cy})':d=1:s={cw}x{ch}:fps={a.fps}[zoomed]");screen='zoomed'
         r=min(a.radius,cw//2,ch//2)
         if r>0:
             alpha=f'if(lte(pow(max({r}-X,0)+max(X-(W-{r}-1),0),2)+pow(max({r}-Y,0)+max(Y-(H-{r}-1),0),2),{r*r}),255,0)'
@@ -150,9 +147,9 @@ def main():
         filters.append(f'[bg][{screen}]overlay=x={ox}:y={oy}:shortest=1[composite]');last='composite';idx=2
         def displayed(axis):
             coordinate=position(axis)
-            if not clicks or a.zoom<=1:return coordinate
-            zoom='min('+str(a.zoom)+',1+'+'+'.join(f'({a.zoom-1})*max(0,1-abs(t-{e["t"]:.4f})/{a.zoom_duration/2})' for e in clicks)+')'
-            return f'(({coordinate})-max(0,min(1-1/({zoom}),({coordinate})-1/({zoom})/2)))*({zoom})'
+            if not frames:return coordinate
+            zoom=zx.replace('on',f'(t*{a.fps})');crop=(cx if axis=='x' else cy).replace('on',f'(t*{a.fps})')
+            return f'(({coordinate})-({crop}))*({zoom})'
         if events and a.cursor_size>0:
             size=a.cursor_size
             png(tmp/'cursor.png',size,size,lambda x,y:(255,255,255,255 if (x-size/2)**2+(y-size/2)**2<(size/2-1)**2 else 0))
@@ -165,12 +162,13 @@ def main():
             filters.append(f"[{last}][{idx}:v]overlay=x='{ox}+{cw}*({displayed('x')})-32':y='{oy}+{ch}*({displayed('y')})-32':enable='{enables}':shortest=1[clicks]");last='clicks';idx+=1
         if a.webcam:
             cmd+=['-i',str(a.webcam)]
-            filters.append(f'[{idx}:v]trim=start={a.start}:end={end},setpts=(PTS-STARTPTS)/{a.speed},scale={max(64,w//5//2*2)}:-2[cam]')
+            filters+=montage_filter(f'{idx}:v','v',ranges,a.speed,'camJoin')
+            filters.append(f'[camJoin]scale={max(64,w//5//2*2)}:-2[cam]')
             filters.append(f'[{last}][cam]overlay=x=W-w-32:y=H-h-32:eof_action=pass[webcam]');last='webcam';idx+=1
-        if a.captions and native_subtitles:
+        if subtitle_path and native_subtitles:
             escaped=str(subtitle_path.resolve()).replace('\\','\\\\').replace(':','\\:').replace("'","\\'")
             filters.append(f"[{last}]subtitles=filename='{escaped}'[captioned]");last='captioned'
-        if a.captions and not native_subtitles:
+        if subtitle_path and not native_subtitles:
             def timestamp(value):
                 hours,minutes,seconds=value.replace(',', '.').split(':')
                 return int(hours)*3600+int(minutes)*60+float(seconds)
@@ -184,7 +182,6 @@ def main():
                 text=re.sub(r'<[^>]+>','', '\n'.join(lines[timing+1:]))
                 if text and endtime>start and start<out_duration:
                     cues.append({'text':text,'start':max(0,start),'end':min(out_duration,endtime),'path':str(tmp/f'caption-{len(cues)}.png')})
-            if not cues:p.error('SRT contains no captions in the output timeline')
             manifest=tmp/'captions.json';manifest.write_text(json.dumps(cues))
             subtitle_height=max(100,h//4)
             renderer=[str(a.subtitle_renderer)] if a.subtitle_renderer else ['swift',str(Path(__file__).with_name('subtitles.swift'))]
@@ -204,7 +201,8 @@ def main():
             labels=[]
             for n,stream in enumerate(audio_streams):
                 label=f'audio{n}';labels.append(label)
-                filters.append(f'[0:{stream["index"]}]atrim=start={a.start}:end={end},asetpts=PTS-STARTPTS,'+','.join(tempos)+(',afftdn=nf=-25' if a.denoise else '')+f'[{label}]')
+                filters+=montage_filter(f'0:{stream["index"]}','a',ranges,a.speed,label+'Join')
+                filters.append(f'[{label}Join]'+','.join(tempos)+(',afftdn=nf=-25' if a.denoise else '')+f'[{label}]')
             if a.music:
                 music_info=probe(a.ffmpeg,a.music)
                 if not any(s['codec_type']=='audio' for s in music_info['streams']):p.error('music file contains no audio stream')
@@ -236,4 +234,4 @@ if __name__=='__main__':
     try:main()
     except KeyboardInterrupt:
         event(phase='cancelled'); raise SystemExit(130)
-    except (RuntimeError,FileNotFoundError,subprocess.CalledProcessError) as exc:raise SystemExit(str(exc))
+    except (ValueError,RuntimeError,FileNotFoundError,subprocess.CalledProcessError) as exc:raise SystemExit(str(exc))

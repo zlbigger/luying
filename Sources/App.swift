@@ -12,6 +12,7 @@ struct StudioView: View {
     @StateObject private var capture = CaptureEngine()
     @StateObject private var camera = WebcamRecorder()
     @StateObject private var exporter = ExportController()
+    @StateObject private var timeline = TimelineModel()
     @StateObject private var transcriber = Transcriber()
     @State private var locale = "zh-CN"
     @State private var outputWidth = 1920
@@ -35,13 +36,12 @@ struct StudioView: View {
     @State private var webcamURL: URL?
     @State private var captionsURL: URL?
     @State private var player: AVPlayer?
-    @State private var start = "0"
-    @State private var end = ""
     @State private var speed = 1.0
     @State private var aspect = "16:9"
     @State private var padding = 60.0
     @State private var zoom = true
     @State private var clicks = true
+    @State private var editTab = "剪辑"
     @State private var format = "mp4"
     private var exporting: Bool { exporter.isRunning }
     @State private var recordingBusy = false
@@ -87,11 +87,16 @@ struct StudioView: View {
                     RoundedRectangle(cornerRadius: 16).fill(LinearGradient(colors: [.indigo.opacity(0.8), .purple.opacity(0.5), .pink.opacity(0.3)], startPoint: .topLeading, endPoint: .bottomTrailing))
                     if let player { NativeVideoPlayer(player: player).padding(24) }
                     else { VStack(spacing: 14) { Image(systemName: "video.badge.waveform").font(.system(size: 52)); Text("把操作录成好看的视频").font(.title2); Text("录制完成后即可预览、裁剪和导出").foregroundStyle(.secondary) } }
-                }.frame(minHeight: 260)
+                }.frame(height:220)
                 if let video { Text((showingEffects ? "效果预览 · " : "原始素材预览 · ") + video.lastPathComponent).font(.caption).foregroundStyle(.secondary) }
+                if video != nil {
+                    Picker("编辑工作区",selection:$editTab) { Text("剪辑").tag("剪辑");Text("缩放").tag("缩放");Text("画布与声音").tag("画布") }.pickerStyle(.segmented)
+                    if editTab != "画布" { TimelineView(model:timeline,speed:speed,video:video,mode:editTab,seek:seekSource,notify:{ message=$0 }).disabled(exporting || capture.isRecording || recordingBusy || capture.isSaving) }
+                    HStack { Picker("速度",selection:$speed) { ForEach([0.5,1.0,1.5,2.0],id:\.self) { Text("\($0,specifier:"%.1f")×").tag($0) } }.frame(width:160);Spacer() }.disabled(exporting || capture.isRecording)
+                }
+                if video == nil || editTab == "画布" {
                 GroupBox("编辑与画布") {
                     VStack(spacing: 12) {
-                        HStack { TextField("起点（秒）", text: $start); TextField("终点（秒，留空至结尾）", text: $end); Picker("速度", selection: $speed) { ForEach([0.5,1.0,1.5,2.0], id: \.self) { Text("\($0, specifier: "%.1f")×").tag($0) } }.frame(width: 145) }
                         HStack { Picker("画布", selection: $aspect) { ForEach(["16:9","9:16","1:1","4:3"], id: \.self) { Text($0).tag($0) } }; Text("边距 \(Int(padding))"); Slider(value: $padding, in: 0...160) }
                         HStack { Picker("导出宽度", selection: $outputWidth) { Text("1280 px").tag(1280); Text("1920 px").tag(1920); Text("2560 px").tag(2560); Text("3840 px").tag(3840) }; Picker("背景", selection: $background) { Text("紫夜").tag("#18233f,#7849b8"); Text("海蓝").tag("#083344,#0891b2"); Text("暖橙").tag("#7c2d12,#fb923c"); Text("深灰").tag("#18181b,#3f3f46") } }
                         HStack { Toggle("点击自动缩放", isOn: $zoom); Toggle("点击提示", isOn: $clicks); Spacer(); Button(captionsURL == nil ? "导入 SRT 字幕…" : "已选择字幕") { captionsURL = chooseFile(types: ["srt"]) } }
@@ -99,15 +104,23 @@ struct StudioView: View {
                     HStack { Picker("字幕语言", selection: $locale) { Text("中文").tag("zh-CN"); Text("English").tag("en-US") }.frame(width: 155); Button(transcriber.isWorking ? "识别中…" : "生成本地字幕") { Task { guard let video else { return }; do { captionsURL = try await transcriber.transcribe(video: video, locale: locale); message = "字幕已生成：\(captionsURL!.lastPathComponent)" } catch { message = error.localizedDescription } } }.disabled(video == nil || transcriber.isWorking || recordingBusy || capture.isSaving); Spacer() }
                     }.padding(8)
                 }.disabled(exporting || capture.isRecording || recordingBusy || capture.isSaving)
+                }
+                Spacer(minLength:0)
                 HStack { Picker("格式", selection: $format) { Text("MP4").tag("mp4"); Text("GIF").tag("gif") }.frame(width: 140); Spacer(); Button("效果预览") { exportVideo(preview: true) }.disabled(video == nil || exporting || capture.isRecording || recordingBusy || capture.isSaving);  Button(exporting ? "正在导出…" : "导出视频…", systemImage: "square.and.arrow.up") { exportVideo() }.buttonStyle(.borderedProminent).disabled(video == nil || exporting || capture.isRecording || recordingBusy || capture.isSaving) }
                 if exporting { VStack(alignment: .leading, spacing: 6) { ProgressView(value: exporter.progress); HStack { Text(exporter.phase); Text(exporter.remaining).foregroundStyle(.secondary); Spacer(); Button("取消导出") { exporter.cancel() } } }.font(.caption) }
                 if exporter.canRetry && !exporting { Button("重试上次导出") { exporter.retry() }.disabled(capture.isRecording || recordingBusy) }
                 Text(exporter.message.isEmpty ? message : exporter.message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).lineLimit(4)
             }.padding(26)
         }.onChange(of: capture.isRecording || capture.isSaving || recordingBusy || exporting, initial: true) { _, busy in AppActivity.shared.busy = busy }
+        .onChange(of: video) { _, url in
+            timeline.observe(player,source:!showingEffects)
+        }
+        .onChange(of: player) { _,_ in timeline.observe(player,source:!showingEffects) }
+        .onChange(of: showingEffects) { _, effects in timeline.observe(player,source:!effects) }
         .onChange(of: message) { _, _ in exporter.clearMessage() }
         .onChange(of: recoveryData) { _, data in
             guard let data else { return }
+            if showingEffects, let video { showingEffects=false;player=AVPlayer(url:video) }
             do { let url = recoveryURL; try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true); try data.write(to: url, options: .atomic) }
             catch { message = "自动保存编辑参数失败，请手动保存项目：\(error.localizedDescription)" }
         }.onChange(of: camera.error) { _, error in if let error { message = "摄像头异常：\(error)。屏幕录制继续。" } }
@@ -117,7 +130,7 @@ struct StudioView: View {
             else { NSWorkspace.shared.activateFileViewerSelecting([url]) }
         }.onChange(of: capture.recoveredURL) { _, url in
             guard let url else { return }
-            Task { if webcam { webcamURL = await camera.stop() }; video = url; player = AVPlayer(url: url); showingEffects = false; message = "录制被中断，已保存可恢复的视频。" }
+            Task { if webcam { webcamURL = await camera.stop() }; video = url; timeline.load(url); player = AVPlayer(url: url); showingEffects = false; message = "录制被中断，已保存可恢复的视频。" }
         }.task { capture.refreshDeviceStatus(); restoreRecovery(); if video == nil { message = "选择录制类型，再点击选择按钮。" } }.onReceive(timer) { _ in capture.refreshDeviceStatus(); if capture.isRecording && !capture.isPaused { elapsed += 1 } }
     }
     private var supportsMicrophone: Bool { if #available(macOS 15.0, *) { return true }; return false }
@@ -130,7 +143,7 @@ struct StudioView: View {
         recordingBusy = true; defer { recordingBusy = false }
         if capture.isRecording {
             let saved = await capture.stop()
-            if let saved { video = saved }
+            if let saved { video = saved; timeline.load(saved) }
             if webcam { webcamURL = await camera.stop() }
             if let saved { player = AVPlayer(url: saved); showingEffects = false; message = "录制已保存。设置裁剪、画布和效果，然后导出。" }
             else { message = capture.error ?? "保存失败" }
@@ -156,8 +169,8 @@ struct StudioView: View {
     }
     private var recoveryURL: URL { FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("LuYing/Recovery.ossproject") }
     private var currentProject: StudioProject? {
-        guard let video else { return nil }
-        return StudioProject(video: video.path, webcam: webcamURL?.path, captions: captionsURL?.path, start: start, end: end, speed: speed, aspect: aspect, padding: padding, zoom: zoom, clicks: clicks, fps: fps, width: outputWidth, background: background, denoise: denoise, music: musicURL?.path, backgroundImage: backgroundImageURL?.path, recordedCursor: recordedCursor)
+        guard let video, !timeline.loading, timeline.duration>0 else { return nil }
+        return StudioProject(video: video.path, webcam: webcamURL?.path, captions: captionsURL?.path, start: String(timeline.edit.start), end: String(timeline.edit.end), speed: speed, aspect: aspect, padding: padding, zoom: zoom, clicks: clicks, fps: fps, width: outputWidth, background: background, denoise: denoise, music: musicURL?.path, backgroundImage: backgroundImageURL?.path, recordedCursor: recordedCursor, timeline: timeline.edit)
     }
     private var recoveryData: Data? { currentProject.flatMap { let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]; return try? encoder.encode($0) } }
     func restoreRecovery() {
@@ -165,7 +178,8 @@ struct StudioView: View {
         applyProject(p); message = "已恢复上次编辑，原素材保留在原位置。"
     }
     func applyProject(_ p: StudioProject) {
-        video = URL(fileURLWithPath: p.video); webcamURL = p.webcam.map { URL(fileURLWithPath: $0) }; captionsURL = p.captions.map { URL(fileURLWithPath: $0) }; start = p.start; end = p.end; speed = p.speed; aspect = p.aspect; padding = p.padding; zoom = p.zoom; clicks = p.clicks; fps = p.fps; outputWidth = p.width; background = p.background; denoise = p.denoise ?? false; recordedCursor = p.recordedCursor ?? true; showingEffects = false; musicURL = p.music.map { URL(fileURLWithPath: $0) }; backgroundImageURL = p.backgroundImage.map { URL(fileURLWithPath: $0) }; player = AVPlayer(url: video!)
+        video = URL(fileURLWithPath: p.video);
+        timeline.load(video!,saved:p.timeline ?? TimelineEdit(start:Double(p.start) ?? 0,end:Double(p.end) ?? 0)); webcamURL = p.webcam.map { URL(fileURLWithPath: $0) }; captionsURL = p.captions.map { URL(fileURLWithPath: $0) }; speed = p.speed; aspect = p.aspect; padding = p.padding; zoom = p.zoom; clicks = p.clicks; fps = p.fps; outputWidth = p.width; background = p.background; denoise = p.denoise ?? false; recordedCursor = p.recordedCursor ?? true; showingEffects = false; musicURL = p.music.map { URL(fileURLWithPath: $0) }; backgroundImageURL = p.backgroundImage.map { URL(fileURLWithPath: $0) }; player = AVPlayer(url: video!)
     }
     func saveProject() {
         guard let project = currentProject else { return }
@@ -179,17 +193,27 @@ struct StudioView: View {
         do { let p = try JSONDecoder().decode(StudioProject.self, from: Data(contentsOf: url)); guard FileManager.default.fileExists(atPath: p.video) else { throw CaptureFailure.message("素材已移动，请恢复至：\(p.video)") }; applyProject(p); projectURL = url; message = "项目已恢复。" } catch { message = error.localizedDescription }
     }
     func chooseFile(types: [String]) -> URL? { let panel = NSOpenPanel(); panel.allowedContentTypes = types.compactMap { UTType(filenameExtension: $0) }; panel.canChooseDirectories = false; return panel.runModal() == .OK ? panel.url : nil }
-    func chooseVideo() { if let url = chooseFile(types: ["mov","mp4","m4v"]) { video = url; webcamURL = nil; captionsURL = nil; recordedCursor = true; player = AVPlayer(url: url); showingEffects = false; message = "已导入视频。鼠标自动缩放需要同名 JSON 轨迹文件。" } }
+    func chooseVideo() { if let url = chooseFile(types: ["mov","mp4","m4v"]) { video = url; timeline.load(url); webcamURL = nil; captionsURL = nil; recordedCursor = true; player = AVPlayer(url: url); showingEffects = false; message = "已导入视频。鼠标自动缩放需要同名 JSON 轨迹文件。" } }
+    func seekSource(_ seconds: Double) {
+        guard let video else { return }
+        if showingEffects { player=AVPlayer(url:video);showingEffects=false }
+        player?.pause();player?.seek(to:CMTime(seconds:seconds,preferredTimescale:600),toleranceBefore:.zero,toleranceAfter:.zero)
+        timeline.playhead=seconds;timeline.observe(player,source:true)
+    }
     func exportVideo(preview: Bool = false) {
         guard let video else { return }
-        guard let begin = Double(start), begin >= 0, end.isEmpty || (Double(end) != nil && Double(end)! > begin) else { message = "裁剪时间无效：终点必须大于起点。"; return }
+        guard !timeline.loading, timeline.keptDuration>0.05 else { message="请等待素材读取，并保留至少 0.05 秒画面。"; return }
+        let edits=timeline.edit
         let destination: URL
         if preview { destination = FileManager.default.temporaryDirectory.appendingPathComponent("OpenScreenStudio-preview-\(UUID().uuidString).mp4") }
         else { let panel = NSSavePanel(); panel.nameFieldStringValue = "Studio-export.\(format)"; panel.allowedContentTypes = [UTType(filenameExtension: format)!]; guard panel.runModal() == .OK, let url = panel.url else { return }; destination = url }
-        var args = [video.path, destination.path, "--start", start, "--speed", String(speed), "--aspect", aspect, "--padding", String(Int(padding)), "--fps", String(fps), "--cursor-size", recordedCursor ? "0" : "18", "--width", String(preview ? min(outputWidth,960) : outputWidth), "--background", background]
-        if preview { args += ["--end", String(min(Double(end) ?? (begin + 8), begin + 8))] } else if !end.isEmpty { args += ["--end",end] }
+        var args = [video.path, destination.path, "--start", String(edits.start), "--end", String(edits.end), "--speed", String(speed), "--aspect", aspect, "--padding", String(Int(padding)), "--fps", String(fps), "--cursor-size", recordedCursor ? "0" : "18", "--width", String(preview ? min(outputWidth,960) : outputWidth), "--background", background]
+        if let data=try? JSONEncoder().encode(edits.cuts),let json=String(data:data,encoding:.utf8) { args += ["--cuts-json",json] }
+        if let data=try? JSONEncoder().encode(edits.scenes),let json=String(data:data,encoding:.utf8) { args += ["--zoom-scenes-json",json] }
+        if !zoom { args += ["--zoom","1"] }
+        if preview { args += ["--preview-duration","8"] }
         let mouse = video.deletingPathExtension().appendingPathExtension("json")
-        if FileManager.default.fileExists(atPath: mouse.path) { args += ["--mouse",mouse.path]; if !zoom { args += ["--zoom","1"] }; if !clicks { args += ["--no-clicks"] } }
+        if FileManager.default.fileExists(atPath: mouse.path) { args += ["--mouse",mouse.path]; if !clicks { args += ["--no-clicks"] } }
         if let webcamURL, FileManager.default.fileExists(atPath: webcamURL.path) { args += ["--webcam",webcamURL.path] }
         if let captionsURL { args += ["--captions",captionsURL.path] }
         if denoise { args += ["--denoise"] }
@@ -201,12 +225,12 @@ struct StudioView: View {
 
 struct NativeVideoPlayer: NSViewRepresentable {
     let player: AVPlayer
-    func makeNSView(context: Context) -> AVPlayerView { let view = AVPlayerView(); view.controlsStyle = .inline; view.player = player; return view }
+    func makeNSView(context: Context) -> AVPlayerView { let view = AVPlayerView(); view.controlsStyle = .inline; view.allowsVideoFrameAnalysis = false; view.player = player; return view }
     func updateNSView(_ view: AVPlayerView, context: Context) { if view.player !== player { view.player = player } }
 }
 
 struct StudioProject: Codable {
     let video: String; let webcam: String?; let captions: String?
     let start: String; let end: String; let speed: Double; let aspect: String; let padding: Double
-    let zoom: Bool; let clicks: Bool; let fps: Int; let width: Int; let background: String; let denoise: Bool?; let music: String?; let backgroundImage: String?; let recordedCursor: Bool?
+    let zoom: Bool; let clicks: Bool; let fps: Int; let width: Int; let background: String; let denoise: Bool?; let music: String?; let backgroundImage: String?; let recordedCursor: Bool?; let timeline: TimelineEdit?
 }

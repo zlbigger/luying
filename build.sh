@@ -32,7 +32,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIdentifier</key><string>local.openscreenstudio.app</string>
 <key>CFBundleExecutable</key><string>OpenScreenStudio</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.2.0</string>
+<key>CFBundleShortVersionString</key><string>0.3.0</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSSpeechRecognitionUsageDescription</key><string>在本机识别录制音频并生成字幕，不上传音频。</string>
