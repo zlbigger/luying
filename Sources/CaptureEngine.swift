@@ -33,6 +33,7 @@ final class CaptureEngine: NSObject, ObservableObject {
     @Published var windows: [CaptureWindow] = []
     @Published var selectedSourceName = "尚未选择"
     @Published var hasSelectedSource = false
+    var selectedDisplayID: CGDirectDisplayID? { guard let id = pendingSourceID, id.hasPrefix("display-") else { return nil };return UInt32(id.dropFirst(8)) }
     private var selectedMode = "display"
     private var pickedFilter: SCContentFilter?
     private var pickerCompletion: CheckedContinuation<Bool, Never>?

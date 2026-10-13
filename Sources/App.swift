@@ -47,7 +47,8 @@ struct StudioView: View {
     @State private var windowID: UInt32 = 0
     @State private var microphone = false
     @State private var systemAudio = true
-    @State private var region = "0,0,1280,720"
+    @State private var region: CGRect?
+    @State private var regionSelection = RegionSelection()
     @State private var webcam = false
     @State private var cursor = true
     @State private var fps = 60
@@ -73,11 +74,11 @@ struct StudioView: View {
                 Text("本地录制 · 免费导出 · 无水印").foregroundStyle(.secondary)
                 Divider()
                 Text("录制来源").font(.headline)
-                Picker("类型", selection: $source) { Text("显示器").tag("display"); Text("窗口").tag("window"); Text("区域").tag("region") }.pickerStyle(.segmented).disabled(capture.isRecording || recordingBusy || capture.isSaving).onChange(of: source) { _, _ in capture.clearSelectedSource() }
-                Button(source == "window" ? "选择窗口…" : "选择显示器…") { Task { await selectRecordingSource() } }.disabled(capture.isRecording || recordingBusy || capture.isSaving || capture.isStarting || capture.isSelecting)
+                Picker("类型", selection: $source) { Text("显示器").tag("display"); Text("窗口").tag("window"); Text("区域").tag("region") }.pickerStyle(.segmented).disabled(capture.isRecording || recordingBusy || capture.isSaving).onChange(of: source) { _, _ in capture.clearSelectedSource();region = nil }
+                Button(source == "region" ? "框选录制区域…" : (source == "window" ? "选择窗口…" : "选择显示器…")) { Task { await selectRecordingSource() } }.disabled(capture.isRecording || recordingBusy || capture.isSaving || capture.isStarting || capture.isSelecting)
                 if capture.isSelecting { Button("取消选择") { capture.cancelSelection() } }
                 Text(capture.selectedSourceName).font(.caption).foregroundStyle(.secondary).lineLimit(3)
-                if source == "region" { TextField("区域 x,y,宽,高（逻辑像素）", text: $region); Text("先选择显示器，再设置显示器内的录制区域。").font(.caption).foregroundStyle(.secondary) }
+                if source == "region" { Text(region.map { "已框选 \(Int($0.width)) × \(Int($0.height)) · 点击上方按钮重新选择" } ?? "选择显示器后，直接拖动鼠标框选范围。").font(.caption).foregroundStyle(.secondary) }
                 Toggle("录制系统声音", isOn: $systemAudio).disabled(capture.isRecording || capture.isSaving || capture.isStarting || recordingBusy || capture.isSelecting)
                 Toggle("录制麦克风", isOn: $microphone).disabled(capture.isRecording || capture.isSaving || capture.isStarting || recordingBusy || capture.isSelecting)
                 if microphone && supportsMicrophone && !capture.isRecording && !recordingBusy {
@@ -220,7 +221,15 @@ struct StudioView: View {
     }
     private var supportsMicrophone: Bool { if #available(macOS 15.0, *) { return true }; return false }
     func selectRecordingSource() async {
-        if await capture.selectSource(mode: source) { message = "已选择：\(capture.selectedSourceName)。可以开始录制。" } else { message = capture.status }
+        if await capture.selectSource(mode: source) {
+            if source == "region" {
+                guard let id = capture.selectedDisplayID else { capture.clearSelectedSource();return }
+                let studio = NSApp.windows.first { $0.identifier?.rawValue == "studio" };studio?.orderOut(nil)
+                region = await regionSelection.choose(displayID:id)
+                studio?.makeKeyAndOrderFront(nil)
+                guard region != nil else { capture.clearSelectedSource();message = "已取消区域选择";return }
+            }
+            message = "已选择：\(capture.selectedSourceName)。可以开始录制。" } else { message = capture.status }
     }
     func refresh() async { do { try await capture.refreshSources() } catch { message = error.localizedDescription } }
     func record() async {
@@ -241,7 +250,7 @@ struct StudioView: View {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             let destination = folder.appendingPathComponent("Recording-\(Int(Date().timeIntervalSince1970)).mov")
             var crop: CGRect? = nil
-            if source == "region" { let v = region.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }; guard v.count == 4, v[2] > 0, v[3] > 0 else { throw CaptureFailure.message("区域格式应为 x,y,宽,高，例如 0,0,1280,720。") }; crop = CGRect(x: v[0], y: v[1], width: v[2], height: v[3]) }
+            if source == "region" { guard let region else { throw CaptureFailure.message("请先框选录制区域。") };crop = region }
             let free = try folder.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage ?? Int64.max
             guard free > 512 * 1024 * 1024 else { throw CaptureFailure.message("可用空间不足 512 MB，请清理磁盘后再录制。") }
             if microphone && !supportsMicrophone { throw CaptureFailure.message("麦克风录制需要 macOS 15+。") }
@@ -273,6 +282,7 @@ struct StudioView: View {
         video = URL(fileURLWithPath: p.video);
         timeline.load(video!,saved:p.timeline ?? TimelineEdit(start:Double(p.start) ?? 0,end:Double(p.end) ?? 0)); webcamURL = p.webcam.map { URL(fileURLWithPath: $0) }; captionsURL = p.captions.map { URL(fileURLWithPath: $0) }; speed = p.speed; aspect = p.aspect; padding = p.padding; zoom = p.zoom; clicks = p.clicks; fps = p.fps; outputWidth = p.width; background = p.background; denoise = p.denoise ?? false; recordedCursor = p.recordedCursor ?? true; showingEffects = false; musicURL = p.music.map { URL(fileURLWithPath: $0) }; backgroundImageURL = p.backgroundImage.map { URL(fileURLWithPath: $0) }; player = AVPlayer(url: video!)
     }
+    static func exportTimestamp() -> String { let formatter = DateFormatter();formatter.dateFormat = "yyyyMMdd-HHmmss-SSS";return formatter.string(from:Date()) }
     func saveProject() {
         guard let project = currentProject else { return }
         let panel = NSSavePanel(); panel.nameFieldStringValue = "Untitled"; panel.allowedContentTypes = [UTType(filenameExtension: "ossproject") ?? .json]
@@ -298,7 +308,7 @@ struct StudioView: View {
         let edits=timeline.edit
         let destination: URL
         if preview { destination = FileManager.default.temporaryDirectory.appendingPathComponent("OpenScreenStudio-preview-\(UUID().uuidString).mp4") }
-        else { let panel = NSSavePanel(); panel.nameFieldStringValue = "Studio-export.\(format)"; panel.allowedContentTypes = [UTType(filenameExtension: format)!]; guard panel.runModal() == .OK, let url = panel.url else { return }; destination = url }
+        else { let panel = NSSavePanel(); panel.nameFieldStringValue = "录映-\(Self.exportTimestamp()).\(format)"; panel.allowedContentTypes = [UTType(filenameExtension: format)!]; guard panel.runModal() == .OK, let url = panel.url else { return }; destination = url }
         var args = [video.path, destination.path, "--start", String(edits.start), "--end", String(edits.end), "--speed", String(speed), "--aspect", aspect, "--padding", String(Int(padding)), "--fps", String(fps), "--cursor-size", recordedCursor ? "0" : "18", "--width", String(preview ? min(outputWidth,960) : outputWidth), "--background", background]
         if let data=try? JSONEncoder().encode(edits.cuts),let json=String(data:data,encoding:.utf8) { args += ["--cuts-json",json] }
         if let data=try? JSONEncoder().encode(edits.scenes),let json=String(data:data,encoding:.utf8) { args += ["--zoom-scenes-json",json] }
