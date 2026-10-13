@@ -158,22 +158,22 @@ final class RecordingMenu: NSObject, ObservableObject, NSWindowDelegate {
 final class RecordingCountdown: NSObject {
     private var panel: NSPanel?
     private var cancelled = false
-    @objc private func cancel() { cancelled = true;panel?.close() }
-    func run(source: String) async -> Bool {
+    @objc func cancel() { cancelled = true;panel?.close() }
+    func run(source: String, resuming: Bool = false) async -> Bool {
         cancelled = false
         let window = NSPanel(contentRect:NSRect(x:0,y:0,width:420,height:180),styleMask:[.titled],backing:.buffered,defer:false)
-        window.title = "即将录制 · 录映";window.level = .floating;window.hidesOnDeactivate = false;window.isReleasedWhenClosed = false
+        window.title = resuming ? "即将继续 · 录映" : "即将录制 · 录映";window.level = .floating;window.hidesOnDeactivate = false;window.isReleasedWhenClosed = false
         window.collectionBehavior = [.canJoinAllSpaces,.fullScreenAuxiliary]
-        let count = NSTextField(labelWithString:"3");count.font = .systemFont(ofSize:48,weight:.bold)
+        let count = NSTextField(labelWithString:"5");count.font = .systemFont(ofSize:48,weight:.bold)
         let label = NSTextField(wrappingLabelWithString:source);label.alignment = .center
-        let button = NSButton(title:"取消录制",target:self,action:#selector(cancel));button.bezelStyle = .rounded
+        let button = NSButton(title:resuming ? "保持暂停" : "取消录制",target:self,action:#selector(cancel));button.bezelStyle = .rounded
         let stack = NSStackView(views:[label,count,button]);stack.orientation = .vertical;stack.spacing = 12;stack.translatesAutoresizingMaskIntoConstraints = false
         let content = NSView();window.contentView = content;content.addSubview(stack)
         NSLayoutConstraint.activate([stack.centerXAnchor.constraint(equalTo:content.centerXAnchor),stack.centerYAnchor.constraint(equalTo:content.centerYAnchor),label.widthAnchor.constraint(lessThanOrEqualToConstant:390)])
         if let area = (NSApp.keyWindow?.screen ?? NSScreen.main)?.visibleFrame { window.setFrameOrigin(NSPoint(x:area.midX-210,y:area.midY-90)) } else { window.center() }
         panel = window;window.makeKeyAndOrderFront(nil)
         defer { window.close();panel = nil }
-        for second in stride(from:3,through:1,by:-1) {
+        for second in stride(from:5,through:1,by:-1) {
             guard !cancelled, !Task.isCancelled else { return false }
             count.stringValue = String(second)
             do { try await Task.sleep(nanoseconds:1_000_000_000) } catch { return false }

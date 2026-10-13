@@ -19,6 +19,7 @@ struct OpenScreenStudioApp: App {
     }
 }
 struct StudioView: View {
+    @State private var resumeCountdownBusy = false
     @State private var countdown = RecordingCountdown()
     @State private var cameraPreview = CameraPreviewPanel()
     @StateObject private var micCheck = MicrophoneCheck()
@@ -98,7 +99,7 @@ struct StudioView: View {
                     Label(capture.isRecording ? "停止录制 · \(elapsed)s" : "开始录制", systemImage: capture.isRecording ? "stop.fill" : "record.circle")
                         .frame(maxWidth: .infinity).padding(8)
                 }.buttonStyle(.borderedProminent).tint(capture.isRecording ? .red : .indigo).keyboardShortcut("r", modifiers: [.command,.shift]).disabled(exporting || capture.isSaving || capture.isStarting || recordingBusy || capture.isSelecting)
-                if capture.isRecording { Button(capture.isPaused ? "继续录制" : "暂停录制", systemImage: capture.isPaused ? "play.fill" : "pause.fill") { let time = CMClockGetTime(CMClockGetHostTimeClock()); capture.togglePause(at: time); camera.setPaused(capture.isPaused, at: time) } }
+                if capture.isRecording { Button(capture.isPaused ? "继续录制" : "暂停录制", systemImage: capture.isPaused ? "play.fill" : "pause.fill") { Task { await toggleRecordingPause() } } }
                 Text(recordingMenu.shortcutStatus).font(.caption).foregroundStyle(.secondary)
                 Text(capture.deviceStatus).font(.caption).foregroundStyle(.secondary)
                 Text(capture.status).font(.caption).foregroundStyle(.secondary)
@@ -211,10 +212,20 @@ struct StudioView: View {
             Task { if webcam { webcamURL = await camera.stop() }; video = url; timeline.load(url); player = AVPlayer(url: url); showingEffects = false; message = "录制被中断，已保存可恢复的视频。" }
         }.task { capture.refreshDeviceStatus(); restoreRecovery(); if video == nil { message = "选择录制类型，再点击选择按钮。" } }.onReceive(timer) { _ in capture.refreshDeviceStatus(); if capture.isRecording && !capture.isPaused { elapsed += 1 };updateRecordingMenu() }
     }
+    func toggleRecordingPause() async {
+        guard capture.isRecording, !recordingBusy, !capture.isSaving, !resumeCountdownBusy else { return }
+        if capture.isPaused {
+            resumeCountdownBusy = true
+            defer { resumeCountdownBusy = false }
+            guard await countdown.run(source:capture.selectedSourceName,resuming:true), capture.isRecording, capture.isPaused, !capture.isSaving else { return }
+        }
+        let time = CMClockGetTime(CMClockGetHostTimeClock())
+        capture.togglePause(at:time);camera.setPaused(capture.isPaused,at:time)
+    }
     func updateRecordingMenu() {
         recordingMenu.pause = {
             guard capture.isRecording, !recordingBusy, !capture.isSaving else { return }
-            let time = CMClockGetTime(CMClockGetHostTimeClock());capture.togglePause(at: time);camera.setPaused(capture.isPaused, at: time)
+            Task { await toggleRecordingPause() }
         }
         recordingMenu.stop = { guard capture.isRecording, !recordingBusy, !capture.isSaving else { return };Task { await record() } }
         recordingMenu.update(recording: capture.isRecording, paused: capture.isPaused, seconds: elapsed, source: capture.selectedSourceName)
@@ -237,6 +248,7 @@ struct StudioView: View {
         micCheck.stop();preview.syncBack()
         recordingBusy = true; defer { recordingBusy = false }
         if capture.isRecording {
+            countdown.cancel()
             let saved = await capture.stop()
             if let saved { video = saved; timeline.load(saved) }
             if webcam { webcamURL = await camera.stop();Task { await camera.startPreview() } }
