@@ -22,6 +22,8 @@ struct StudioView: View {
     @State private var resumeCountdownBusy = false
     @State private var countdown = RecordingCountdown()
     @State private var cameraPreview = CameraPreviewPanel()
+    @StateObject private var cover = RecordingCover()
+    @State private var coverVisible = true
     @StateObject private var micCheck = MicrophoneCheck()
     @StateObject private var recordingMenu = RecordingMenu()
     @AppStorage("hideWorkbenchWhenRecording") private var hideWorkbench = true
@@ -122,10 +124,24 @@ struct StudioView: View {
                 HStack { Text("创作工作台").font(.title.bold()); Spacer(); Text("LOCAL / FREE").font(.caption.bold()).foregroundStyle(.indigo) }
                 ZStack {
                     RoundedRectangle(cornerRadius: 16).fill(LinearGradient(colors: [.indigo.opacity(0.8), .purple.opacity(0.5), .pink.opacity(0.3)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                    if let player { NativeVideoPlayer(player: player).padding(24) }
+                    if let player {
+                        NativeVideoPlayer(player:player).padding(24)
+                        if coverVisible, let image = cover.image {
+                            Image(nsImage:image).resizable().scaledToFit().padding(24)
+                            Button { coverVisible = false;player.play() } label: { Image(systemName:"play.circle.fill").font(.system(size:48)).foregroundStyle(.white).shadow(radius:4) }.buttonStyle(.plain).accessibilityLabel("播放视频")
+                        }
+                    }
                     else { VStack(spacing: 14) { Image(systemName: "video.badge.waveform").font(.system(size: 52)); Text("把操作录成好看的视频").font(.title2); Text("录制完成后即可预览、裁剪和导出").foregroundStyle(.secondary) } }
                 }.frame(height:220)
                 if let video {
+                    HStack {
+                        Label("视频已保存 · " + cover.duration,systemImage:"checkmark.circle.fill").foregroundStyle(.green)
+                        Spacer()
+                        Button("播放原视频") { showingEffects = false;player = AVPlayer(url:video);coverVisible = false;player?.play() }
+                        Button("打开原视频位置") { NSWorkspace.shared.activateFileViewerSelecting([video]) }
+                        Button("复制原视频") { NSPasteboard.general.clearContents();NSPasteboard.general.writeObjects([video as NSURL]);message = "已复制原视频，可粘贴分享。" }
+                    }.font(.caption).disabled(capture.isRecording || recordingBusy)
+                    Text("原视频可直接使用；跟随缩放、点击提示和画布美化在效果预览与导出中添加。").font(.caption).foregroundStyle(.secondary)
                     if webcamURL != nil { Text(showingEffects ? "已叠加摄像头画面" : "摄像头单独保存 · 在效果预览和导出中叠加").font(.caption).foregroundStyle(.secondary) }
                     HStack {
                         Text((showingEffects ? "效果预览 · " : "原始素材预览 · ") + video.lastPathComponent).font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -192,10 +208,10 @@ struct StudioView: View {
     var body: some View {
         recordingLifecycle.sheet(isPresented: $showingAbout) { AboutLuYingView() }.sheet(isPresented: $capture.isConfirmingSource) { RecordingSourceView(capture: capture) }.onChange(of: capture.isRecording || capture.isSaving || recordingBusy || exporting, initial: true) { _, busy in AppActivity.shared.busy = busy }
         .onChange(of: video) { _, url in
-            timeline.observe(player,source:!showingEffects)
+            coverVisible = true;cover.load(url);timeline.observe(player,source:!showingEffects)
         }
         .onChange(of: player) { _,_ in timeline.observe(player,source:!showingEffects) }
-        .onChange(of: showingEffects) { _, effects in timeline.observe(player,source:!effects) }
+        .onChange(of: showingEffects) { _, effects in coverVisible = !effects;cover.load(video);timeline.observe(player,source:!effects) }
         .onChange(of: message) { _, _ in exporter.clearMessage() }
         .onChange(of: recoveryData) { _, data in
             guard let data else { return }
@@ -249,10 +265,12 @@ struct StudioView: View {
         recordingBusy = true; defer { recordingBusy = false }
         if capture.isRecording {
             countdown.cancel()
-            let saved = await capture.stop()
+            let captured = await capture.stop()
+            let saved: URL?
+            if let captured, microphone { message = "正在准备可直接播放的原视频…";saved = await playableOriginal(captured,tools:Bundle.main.resourceURL?.appendingPathComponent("Tools")) } else { saved = captured }
             if let saved { video = saved; timeline.load(saved) }
             if webcam { webcamURL = await camera.stop();Task { await camera.startPreview() } }
-            if let saved { player = AVPlayer(url: saved); showingEffects = false; message = "录制已保存。设置裁剪、画布和效果，然后导出。" }
+            if let saved { player = AVPlayer(url: saved); showingEffects = false; message = "录制已保存，可直接使用原视频；需要美化时再编辑导出。" }
             else { message = capture.error ?? "保存失败" }
             return
         }
