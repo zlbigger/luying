@@ -9,7 +9,7 @@
 
 录映是一个独立实现、采用 MIT 协议开源的 macOS 应用。无需账号、订阅或付费 API，所有已实现功能均免费开放。录制和媒体处理在本机完成。
 
-**当前为早期版本 v0.3.11**，适合试用和反馈。它不是 Screen Studio 的官方版本，也没有与原版完整功能及质量等价的承诺。
+**当前为早期版本 v0.3.12**，适合试用和反馈。它不是 Screen Studio 的官方版本，也没有与原版完整功能及质量等价的承诺。
 
 ## 功能
 
@@ -38,7 +38,7 @@
 
 **支持：Apple Silicon（M1 或更新），macOS 14+。麦克风录制需要 macOS 15+。Intel 暂无安装包。**
 
-1. 在 [Releases](https://github.com/zlbigger/luying/releases/latest) 下载 `LuYing-v0.3.11-macos-arm64.zip`。
+1. 在 [Releases](https://github.com/zlbigger/luying/releases/latest) 下载 `LuYing-v0.3.12-macos-arm64.zip`。
 2. 解压，将 `录映.app` 拖入「应用程序」。只保留这一份应用，避免 Spotlight 出现重复项。
 3. 打开「录映」，选择「显示器／窗口／区域」，点击「选择显示器…」或「选择窗口…」，核对所选来源的预览，点击「确认录制此来源」，再开始录制。
 

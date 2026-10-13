@@ -109,6 +109,7 @@ def camera_frames(scenes,ranges,speed,fps,duration):
 def expression(values,time='on'):
     """Linear interpolation between adaptively reduced, bounded control points."""
     if not values:return '0'
+    tolerance=.001
     points=[(0,values[0])]
     def simplify(lo,hi):
         if hi-lo<=1:return
@@ -116,19 +117,23 @@ def expression(values,time='on'):
         for n in range(lo+1,hi):
             error=abs(values[n]-(values[lo]+(values[hi]-values[lo])*(n-lo)/span))
             if error>worst:worst=error;at=n
-        if worst>.001 and at is not None:
+        if worst>tolerance and at is not None:
             simplify(lo,at);points.append((at,values[at]));simplify(at,hi)
-    # Chunking keeps recursion bounded on long recordings and cut boundaries.
-    for lo in range(0,len(values)-1,300):
-        hi=min(len(values)-1,lo+300);simplify(lo,hi);points.append((hi,values[hi]))
-    ordered=sorted(set(points));points=[]
-    for point in ordered:
-        points.append(point)
-        while len(points)>=3:
-            a,av=points[-3];b,bv=points[-2];c,cv=points[-1]
-            if abs(bv-(av+(cv-av)*(b-a)/(c-a)))>1e-10:break
-            points.pop(-2)
-    if len(points)>1200:raise ValueError('缩放轨迹过长，请缩短导出区间或减少缩放区间')
+    # Adapt precision to FFmpeg's expression budget instead of rejecting long clips.
+    # Keep the normal 0.001 tolerance unless this actual trajectory exceeds it.
+    while True:
+        points=[(0,values[0])]
+        for lo in range(0,len(values)-1,300):
+            hi=min(len(values)-1,lo+300);simplify(lo,hi);points.append((hi,values[hi]))
+        ordered=sorted(set(points));points=[]
+        for point in ordered:
+            points.append(point)
+            while len(points)>=3:
+                a,av=points[-3];b,bv=points[-2];c,cv=points[-1]
+                if abs(bv-(av+(cv-av)*(b-a)/(c-a)))>1e-10:break
+                points.pop(-2)
+        if len(points)<=1200:break
+        tolerance*=2
     def branch(lo,hi):
         if lo>=hi:return f'{points[lo][1]:.6f}'
         if hi-lo==1:
