@@ -10,9 +10,9 @@ struct OpenScreenStudioApp: App {
     @StateObject private var preview = LargePreviewModel()
     var body: some Scene {
         Window("录映", id: "studio") {
-            StudioView().environmentObject(preview).frame(minWidth: 1050, minHeight: 820)
+            StudioView().environmentObject(preview).frame(minWidth: 900, minHeight: 600)
                 .sheet(isPresented: $showingAbout) { AboutLuYingView() }
-        }.windowStyle(.titleBar)
+        }.windowStyle(.titleBar).defaultSize(width: 1120, height: 740)
         .commands { CommandGroup(replacing: .appInfo) { Button("关于录映") { showingAbout = true } } }
         Window("放大预览", id: "large-preview") { LargePreviewView().environmentObject(preview) }.defaultSize(width: 1000, height: 640)
 
@@ -72,7 +72,7 @@ struct StudioView: View {
     @State private var elapsed = 0
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     private var recordingSidebar: some View {
-            VStack(alignment: .leading, spacing: 20) {
+            ScrollView { VStack(alignment: .leading, spacing: 16) {
                 Label("录映", systemImage: "record.circle").font(.title2.bold())
                 Text("本地录制 · 免费导出 · 无水印").foregroundStyle(.secondary)
                 Divider()
@@ -113,14 +113,14 @@ struct StudioView: View {
                 Text("macOS 原生录制引擎\n所有已实现功能均免费开放").font(.caption).foregroundStyle(.secondary)
                 Link("by zlbigger.com", destination: URL(string: "https://zlbigger.com")!).font(.caption)
                 Button("关于录映 · 支持作者") { showingAbout = true }.buttonStyle(.link).font(.caption)
-            }.padding(24).frame(width: 300).background(Color(nsColor: .windowBackgroundColor))
+            }.padding(18).frame(maxWidth: .infinity, alignment: .leading) }.frame(width: 240).background(Color(nsColor: .windowBackgroundColor))
     }
     private var workbench: some View {
         HStack(spacing: 0) {
             recordingSidebar
 
             Divider()
-            VStack(alignment: .leading, spacing: 18) {
+            ScrollView { VStack(alignment: .leading, spacing: 16) {
                 HStack { Text("创作工作台").font(.title.bold()); Spacer(); Text("LOCAL / FREE").font(.caption.bold()).foregroundStyle(.indigo) }
                 ZStack {
                     RoundedRectangle(cornerRadius: 16).fill(LinearGradient(colors: [.indigo.opacity(0.8), .purple.opacity(0.5), .pink.opacity(0.3)], startPoint: .topLeading, endPoint: .bottomTrailing))
@@ -136,10 +136,14 @@ struct StudioView: View {
                 if let video {
                     HStack {
                         Label("视频已保存 · " + cover.duration,systemImage:"checkmark.circle.fill").foregroundStyle(.green)
-                        Spacer()
+                    }.font(.caption)
+                    ViewThatFits(in: .horizontal) {
+                      originalVideoActions(video)
+                      VStack(alignment: .leading, spacing: 8) {
                         Button("播放原视频") { showingEffects = false;player = AVPlayer(url:video);coverVisible = false;player?.play() }
                         Button("打开原视频位置") { NSWorkspace.shared.activateFileViewerSelecting([video]) }
-                        Button("复制原视频") { NSPasteboard.general.clearContents();NSPasteboard.general.writeObjects([video as NSURL]);message = "已复制原视频，可粘贴分享。" }
+                        Button("复制原视频") { copyOriginal(video) }
+                      }
                     }.font(.caption).disabled(capture.isRecording || recordingBusy)
                     Text("原视频可直接使用；跟随缩放、点击提示和画布美化在效果预览与导出中添加。").font(.caption).foregroundStyle(.secondary)
                     if webcamURL != nil { Text(showingEffects ? "已叠加摄像头画面" : "摄像头单独保存 · 在效果预览和导出中叠加").font(.caption).foregroundStyle(.secondary) }
@@ -153,6 +157,10 @@ struct StudioView: View {
                 }
                 if video != nil {
                     Picker("编辑工作区",selection:$editTab) { Text("剪辑").tag("剪辑");Text("缩放").tag("缩放");Text("画布与声音").tag("画布") }.pickerStyle(.segmented)
+                    if editTab == "缩放" {
+                        Toggle("启用点击自动放大", isOn: $zoom).disabled(exporting || capture.isRecording)
+                        Text("让观众看清点击处的按钮和文字，再平滑回到全景。原素材不变，效果预览和导出才会应用。").font(.caption).foregroundStyle(.secondary)
+                    }
                     if editTab != "画布" { TimelineView(model:timeline,speed:speed,video:video,mode:editTab,seek:seekSource,notify:{ message=$0 }).disabled(exporting || capture.isRecording || recordingBusy || capture.isSaving) }
                     HStack { Picker("速度",selection:$speed) { ForEach([0.5,1.0,1.5,2.0],id:\.self) { Text("\($0,specifier:"%.1f")×").tag($0) } }.frame(width:160);Spacer() }.disabled(exporting || capture.isRecording)
                 }
@@ -162,14 +170,30 @@ struct StudioView: View {
                         HStack { Picker("画布", selection: $aspect) { Text("原始尺寸").tag("original"); ForEach(["16:9","9:16","1:1","4:3"], id: \.self) { Text($0).tag($0) } }; if aspect != "original" { Text("边距 \(Int(padding))"); Slider(value: $padding, in: 0...160) } }
                         if aspect == "original" { Text("保持原视频像素尺寸，不加背景、边距、圆角或阴影。").font(.caption).foregroundStyle(.secondary) }
                         else { HStack { Picker("导出宽度", selection: $outputWidth) { Text("1280 px").tag(1280); Text("1920 px").tag(1920); Text("2560 px").tag(2560); Text("3840 px").tag(3840) }; Picker("背景", selection: $background) { Text("紫夜").tag("#18233f,#7849b8"); Text("海蓝").tag("#083344,#0891b2"); Text("暖橙").tag("#7c2d12,#fb923c"); Text("深灰").tag("#18181b,#3f3f46") } } }
-                        HStack { Toggle("点击自动缩放", isOn: $zoom); Toggle("点击提示", isOn: $clicks); Spacer(); Button(captionsURL == nil ? "导入 SRT 字幕…" : "已选择字幕") { captionsURL = chooseFile(types: ["srt"]) } }
-                    HStack { Toggle("音频降噪", isOn: $denoise); Button(musicURL == nil ? "背景音乐…" : "更换背景音乐…") { musicURL = chooseFile(types: ["mp3","m4a","wav","aiff"]) }; Button(backgroundImageURL == nil ? "背景图片…" : "更换背景图片…") { backgroundImageURL = chooseFile(types: ["png","jpg","jpeg","heic"]) }; if musicURL != nil || backgroundImageURL != nil { Button("清除") { musicURL = nil; backgroundImageURL = nil } } }
+                        HStack { Toggle("点击提示", isOn: $clicks); Spacer(); Button(captionsURL == nil ? "导入 SRT 字幕…" : "已选择字幕") { captionsURL = chooseFile(types: ["srt"]) } }
+                    VStack(alignment: .leading, spacing: 10) { Toggle("音频降噪", isOn: $denoise); HStack { Button(musicURL == nil ? "背景音乐…" : "更换背景音乐…") { musicURL = chooseFile(types: ["mp3","m4a","wav","aiff"]) }; Button(backgroundImageURL == nil ? "背景图片…" : "更换背景图片…") { backgroundImageURL = chooseFile(types: ["png","jpg","jpeg","heic"]) }; if musicURL != nil || backgroundImageURL != nil { Button("清除") { musicURL = nil; backgroundImageURL = nil } } } }
                     HStack { Picker("字幕语言", selection: $locale) { Text("中文").tag("zh-CN"); Text("English").tag("en-US") }.frame(width: 155); Button(transcriber.isWorking ? "识别中…" : "生成本地字幕") { Task { guard let video else { return }; do { captionsURL = try await transcriber.transcribe(video: video, locale: locale); message = "字幕已生成：\(captionsURL!.lastPathComponent)" } catch { message = error.localizedDescription } } }.disabled(video == nil || transcriber.isWorking || recordingBusy || capture.isSaving); Spacer() }
                     }.padding(8)
                 }.disabled(exporting || capture.isRecording || recordingBusy || capture.isSaving)
                 }
-                Spacer(minLength:0)
-                HStack { Picker("格式", selection: $format) { Text("MP4").tag("mp4"); Text("GIF").tag("gif") }.frame(width: 140); Spacer(); Button("效果预览") { exportVideo(preview: true) }.disabled(video == nil || exporting || capture.isRecording || recordingBusy || capture.isSaving);  Button(exporting ? "正在导出…" : "导出视频…", systemImage: "square.and.arrow.up") { exportVideo() }.buttonStyle(.borderedProminent).disabled(video == nil || exporting || capture.isRecording || recordingBusy || capture.isSaving) }
+            }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            .safeAreaInset(edge: .bottom, spacing: 0) { exportFooter }
+        }
+    }
+    private func originalVideoActions(_ video: URL) -> some View {
+        HStack {
+            Button("播放原视频") { showingEffects = false;player = AVPlayer(url:video);coverVisible = false;player?.play() }
+            Button("打开原视频位置") { NSWorkspace.shared.activateFileViewerSelecting([video]) }
+            Button("复制原视频") { copyOriginal(video) }
+        }.fixedSize(horizontal: true, vertical: false)
+    }
+    private func copyOriginal(_ video: URL) {
+        NSPasteboard.general.clearContents();NSPasteboard.general.writeObjects([video as NSURL]);message = "已复制原视频，可粘贴分享。"
+    }
+    private var exportFooter: some View {
+        VStack(alignment: .leading, spacing: 8) {
+                HStack { Picker("格式", selection: $format) { Text("MP4").tag("mp4"); Text("GIF").tag("gif") }.frame(width: 140); Spacer(); Button(editTab == "缩放" && timeline.selectedZoom != nil ? "预览所选缩放" : "效果预览") { exportVideo(preview: true) }.disabled(video == nil || exporting || capture.isRecording || recordingBusy || capture.isSaving);  Button(exporting ? "正在导出…" : "导出视频…", systemImage: "square.and.arrow.up") { exportVideo() }.buttonStyle(.borderedProminent).disabled(video == nil || exporting || capture.isRecording || recordingBusy || capture.isSaving) }
                 if exporting { VStack(alignment: .leading, spacing: 6) { ProgressView(value: exporter.progress); HStack { Text(exporter.phase); Text(exporter.remaining).foregroundStyle(.secondary); Spacer(); Button("取消导出") { exporter.cancel() } } }.font(.caption) }
                 if let lastExport, !exporting {
                     HStack {
@@ -182,8 +206,7 @@ struct StudioView: View {
                 }
                 if exporter.canRetry && !exporting { Button("重试上次导出") { exporter.retry() }.disabled(capture.isRecording || recordingBusy) }
                 Text(exporter.message.isEmpty ? message : exporter.message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).lineLimit(4)
-            }.padding(26)
-        }
+        }.padding(.horizontal, 20).padding(.vertical, 12).frame(maxWidth: .infinity, alignment: .leading).background(Color(nsColor: .windowBackgroundColor))
     }
     private var recordingLifecycle: some View {
         workbench
@@ -339,7 +362,8 @@ struct StudioView: View {
         let destination: URL
         if preview { destination = FileManager.default.temporaryDirectory.appendingPathComponent("OpenScreenStudio-preview-\(UUID().uuidString).mp4") }
         else { let panel = NSSavePanel(); panel.nameFieldStringValue = "录映-\(Self.exportTimestamp()).\(format)"; panel.allowedContentTypes = [UTType(filenameExtension: format)!]; guard panel.runModal() == .OK, let url = panel.url else { return }; destination = url }
-        var args = [video.path, destination.path, "--start", String(edits.start), "--end", String(edits.end), "--speed", String(speed), "--aspect", aspect, "--padding", String(Int(padding)), "--fps", String(fps), "--cursor-size", recordedCursor ? "0" : "18", "--width", String(preview ? min(outputWidth,960) : outputWidth), "--background", background]
+        let previewStart = preview && editTab == "缩放" ? timeline.edit.scenes.first(where: { $0.id == timeline.selectedZoom }).map { max(edits.start, min(edits.end - 0.05, $0.start - 0.4)) } ?? edits.start : edits.start
+        var args = [video.path, destination.path, "--start", String(previewStart), "--end", String(edits.end), "--speed", String(speed), "--aspect", aspect, "--padding", String(Int(padding)), "--fps", String(fps), "--cursor-size", recordedCursor ? "0" : "18", "--width", String(preview ? min(outputWidth,960) : outputWidth), "--background", background]
         if let data=try? JSONEncoder().encode(edits.cuts),let json=String(data:data,encoding:.utf8) { args += ["--cuts-json",json] }
         if let data=try? JSONEncoder().encode(edits.scenes),let json=String(data:data,encoding:.utf8) { args += ["--zoom-scenes-json",json] }
         if !zoom { args += ["--zoom","1"] }

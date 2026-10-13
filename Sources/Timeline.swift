@@ -210,7 +210,7 @@ struct TimelineView: View {
     @State private var zoomEnd = ""
     @FocusState private var focusedField: String?
     var body: some View {
-        GroupBox(mode=="剪辑" ? "时间线 · 原素材时间" : "平滑缩放 · 原素材时间") {
+        GroupBox(mode=="剪辑" ? "时间线 · 原素材时间" : "点击放大 · 原素材时间") {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Text("成片 \(model.keptDuration/speed, specifier: "%.1f") 秒").font(.caption.monospacedDigit())
@@ -249,7 +249,8 @@ struct TimelineView: View {
                     TextField("起点",text:$trimStart).focused($focusedField,equals:"trimStart").frame(width:75).onSubmit { if let value=Double(trimStart),value.isFinite { model.setTrim(value,start:true) };syncTrim() }
                     Text("—")
                     TextField("终点",text:$trimEnd).focused($focusedField,equals:"trimEnd").frame(width:75).onSubmit { if let value=Double(trimEnd),value.isFinite { model.setTrim(value,start:false) };syncTrim() }
-                    Spacer()
+                }
+                HStack {
                     Button("设选区起点") { model.setSelection(model.playhead,start:true) }
                     Button("设选区终点") { model.setSelection(model.playhead,start:false) }
                     Button("删除选区",systemImage:"scissors") { if !model.deleteSelection() { notify("选区无效或删除后没有画面，请保留至少 0.05 秒。") } }
@@ -268,7 +269,7 @@ struct TimelineView: View {
                 }
                 if mode=="缩放" {
                 HStack { Text("缩放区间").font(.caption.bold());Spacer();Button("选区添加缩放") { if !model.addZoom() { notify("请选至少 0.1 秒且不与已有缩放重叠的区间；可先删除已有区间。") } };Button("恢复自动缩放") { model.resetZoom() } }
-                if model.edit.scenes.isEmpty { Text("暂无点击轨迹，可选择区间手动添加缩放。").font(.caption).foregroundStyle(.secondary) }
+                if model.edit.scenes.isEmpty { Text("没有可用的点击缩放区间。导入的视频不含鼠标轨迹；在剪辑页选择时段后，可手动添加。").font(.caption).foregroundStyle(.secondary) }
                 else {
                     Picker("选择缩放区间",selection:$model.selectedZoom) {
                         Text("选择区间以调整焦点").tag(nil as UUID?)
@@ -290,12 +291,18 @@ struct TimelineView: View {
                 }
             }.padding(8)
         }.disabled(model.loading || model.duration<=0)
+        .onChange(of:mode) { _, mode in
+            if mode == "缩放", model.selectedZoom == nil { model.selectedZoom = model.edit.scenes.first?.id;syncZoom() }
+        }
         .onChange(of:focusedField) { previous,_ in
             if previous=="trimStart",let value=Double(trimStart),value.isFinite { model.setTrim(value,start:true) }
             if previous=="trimEnd",let value=Double(trimEnd),value.isFinite { model.setTrim(value,start:false) }
             if previous=="zoomStart" || previous=="zoomEnd",let scene=model.edit.scenes.first(where:{$0.id==model.selectedZoom}) { updateTimes(scene) }
         }
-        .onChange(of:model.edit) { _,_ in if focusedField != "trimStart" && focusedField != "trimEnd" { syncTrim() };if focusedField != "zoomStart" && focusedField != "zoomEnd" { syncZoom() } }.onAppear { syncTrim();syncZoom() }
+        .onChange(of:model.edit) { _,_ in if focusedField != "trimStart" && focusedField != "trimEnd" { syncTrim() };if focusedField != "zoomStart" && focusedField != "zoomEnd" { syncZoom() } }.onAppear {
+            if mode == "缩放", model.selectedZoom == nil { model.selectedZoom = model.edit.scenes.first?.id }
+            syncTrim();syncZoom()
+        }
     }
     private func syncTrim() { trimStart=String(format:"%.2f",model.edit.start);trimEnd=String(format:"%.2f",model.edit.end) }
     private func syncZoom() { if let scene=model.edit.scenes.first(where:{$0.id==model.selectedZoom}) { zoomStart=String(format:"%.2f",scene.start);zoomEnd=String(format:"%.2f",scene.end) } }
